@@ -1,0 +1,12 @@
+1. Deploy:
+    a) general:
+        Normal deploy mode. It will mount "share-data" Volume as base data layer along with "private-data" Volume as upper diff layer for data sharing.
+    b) devops:
+        Deploy AiC in DevOps mode
+2. Storage:
+    a) local:
+        It will use rancher-local-path-storage as storage provisioner, it can only be used on single node.
+    b) remote:
+        It will use Ceph RBD as storage provisioner, it can be used on multiple nodes. However, Ceph monitor node IP in class.yaml and security keys needs to be configured when using this mode.
+3. Usage:
+    Deploy for general mode with local storage: kubectl apply -f general -f storage-local

@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# author: joe.zheng
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+set -e
+
+SELF=`basename $0`
+
+PREFIX=${PREFIX:-"android-"}  # folder name prefix
+BASE_ID=${BASE_ID:-0}         # id for "base"
+
+META_NAME=".data"
+BASE_NAME="base"
+
+# concurrent user data folder name prefix
+CONCURRENT_PREFIX=${CONCURRENT_PREFIX:-"concurrent"}
+
+function msg {
+  echo "> $@"
+}
+
+function err() {
+  echo "> $@" >&2
+}
+
+function main() {
+  local dir="data"
+  local num=${INSTANCES:-2}
+  local user=1
+  local detach="n"
+
+  local help=$(cat <<EOF
+Usage: $SELF [-D] [-n <num>] [-h] [<dir>]
+  Setup user data for aic, focusing on data sharing and dedup
+
+  -n <num>:  number of instances, default: $num
+  -u <user>:  number of multi users in each instance, default: $user
+  -D:        detach all the user data, default: $detach
+  -h:        print the usage message
+  <dir>:     root directory, default: $dir
+
+Data layout:
+  - root: $dir
+    |- meta: $META_NAME
+       |- base: $BASE_NAME
+       |- diff 0: ${PREFIX}$BASE_ID/diff
+       |- diff *: ${PREFIX}*/diff
+    |- data 0: ${PREFIX}$BASE_ID
+    |- data *: ${PREFIX}*
+
+Environment variables:
+  PREFIX:   folder name prefix for each instance, current: $PREFIX
+  BASE_ID:  ID for "data 0", current: $BASE_ID
+
+How it works:
+  we use overlayfs for each "data *", with "base" as the lower layer, and
+  the upper layer, which is the delta, stored in "diff *"
+
+  "data 0" is special which is bind-mounted to the "base" directly, so you
+  can setup "base" via "data 0" easily, set BASE_ID as "none" to disable
+
+Usage:
+  prepare "base":
+    * setup sigle instance: PREFIX=data $SELF -n 1 workdir
+    * install aic and start: aic install && aic start
+    * install apps and stop: aic stop
+    * detach user data: PREFIX=data $SELF -D
+  setup for multiple instances, e.g. 4:
+    * setup user data: PREFIX=data BASE_ID=none $SELF -n 4 workdir
+    * install, start and stop aic as usual
+    * detach user data: PREFIX=data $SELF -D
+  backup the delta:
+    * sudo rsync -Pa --exclude work workdir/${META_NAME}/${PREFIX}* backup/
+EOF
+)
+
+  while getopts ":Dn:u:h" opt
+  do
+    case $opt in
+      D ) detach="y";;
+      n ) num=$OPTARG;;
+      u ) user=$OPTARG;;
+      h ) echo "$help" && exit;;
+      * ) echo "no such option: $opt" && exit 1;;
+    esac
+  done
+  shift $((OPTIND-1))
+
+  dir=${1:-$dir}
+
+  dumpvars "num user dir detach"
+
+  msg "create necessary dirs"
+  for d in "$dir/$META_NAME/$BASE_NAME"; do
+    mkdir -p $d
+  done
+
+  if [[ "$detach" == "y" ]]; then
+    detach "$dir"
+  else
+    attach "$dir" "$num"
+  fi
+
+  msg "done"
+}
+
+function attach() {
+  local dir="$1"
+  local num="$2"
+  local dir_meta="$dir/$META_NAME"
+  local dir_base="$dir_meta/$BASE_NAME"
+
+  msg "attach in $dir"
+  for ((i=0; i<$num; i++)); do
+    local name="${PREFIX}${i}"
+    local dir_dest="$dir/$name"
+
+    msg "attach $name"
+    if mountpoint -q $dir_dest; then
+      msg "already attached, skip"
+      continue
+    fi
+
+    # ensure necessary folders
+    mkdir -p {$dir_meta,$dir}/$name
+    mkdir -p $dir_meta/$name/{diff,work}
+
+    if [[ "$i" == "$BASE_ID" ]]; then
+      msg "bind mount base to $name"
+      # use bind mount for the special case
+      sudo mount --bind "$dir_base" "$dir_dest"
+      sudo mount --make-shared "$dir_dest"
+    else
+      local path="$dir_meta/$name"
+      local opts="lowerdir=$dir_base,upperdir=$path/diff,workdir=$path/work"
+      msg "mount overlay to $name"
+      sudo mount -t overlay -o "$opts" overlay "$dir_dest"
+    fi
+
+    if [[ $user -gt 1 ]]; then
+      for ((j=0; j<$user; j++)); do
+        local con_name="${CONCURRENT_PREFIX}${i}"
+        local con_dir_dest="$dir/$con_name"
+        local user_name="$[j+10]"
+        mkdir -p $con_dir_dest/$user_name
+        mkdir -p $dir_meta/$con_name/$user_name
+        msg "bind mount user data to $con_name/$user_name"
+        sudo mount --bind "$dir_meta/$con_name/$user_name" "$con_dir_dest/$user_name"
+      done
+    fi
+  done
+}
+
+function detach() {
+  local dir="$1"
+
+  msg "detach in $dir"
+  for d in $(ls $dir | grep -E "^${PREFIX}"); do
+    local dst="$dir/$d"
+    msg "detach $d"
+    if mountpoint -q $dst; then
+      sudo umount "$dst"
+    else
+      msg "already detached, skip"
+    fi
+  done
+
+  for c in $(ls $dir | grep -E "^${CONCURRENT_PREFIX}"); do
+    local con_dir="$dir/$c"
+    for u in $(ls $con_dir); do
+      local dst="$con_dir/$u"
+      msg "umount $c/$u"
+      if mountpoint -q $dst; then
+        sudo umount "$dst"
+      else
+        msg "already umount, skip"
+      fi
+    done
+  done
+}
+
+function info() {
+  :
+}
+
+function dumpvars() {
+  for v in $@; do
+    eval echo "$v: \${$v}"
+  done
+}
+
+main "$@"

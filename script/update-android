@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# author: joe.zheng
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+set -e
+
+DOCKER="sudo docker"
+if [[ "$(id -u)" == "0" ]] || id -nG | grep -qw docker; then
+  DOCKER="docker"
+fi
+
+DRY_RUN=n                  # dry run or not
+DIR=update                 # image release dir
+IMG=android.tar.gz         # docker image file
+
+# constants
+EXT_BACK=bak               # extension for backup
+BASE_IMG=android_base      # base image name
+DOCKERFILE_NAME=Dockerfile
+
+function msg {
+  echo "> $@"
+}
+
+function usage() {
+  local self=`basename $0`
+  cat <<EOF
+Usage: $self [-c <dir>] [-n] [-h] [<img>]
+  Update the Android docker image to apply the customization
+
+  -c <dir>:  customization folder, default: $DIR
+  -n:        dry run, print out information only, default: $DRY_RUN
+  -h:        print the usage message
+  <img>:     Android docker image, default: $IMG
+EOF
+
+}
+
+while getopts ":c:hn" opt
+do
+  case $opt in
+    c ) DIR=$OPTARG;;
+    n ) DRY_RUN=y;;
+    h ) usage && exit;;
+    * ) usage && exit 1;;
+  esac
+done
+shift $((OPTIND-1))
+
+IMG=${1:-$IMG}
+IMG_BACKUP="$IMG.$EXT_BACK"
+DOCKERFILE="$DIR/$DOCKERFILE_NAME"
+
+for v in DOCKER DRY_RUN DIR IMG IMG_BACKUP
+do
+  eval echo "$v: \${$v}"
+done
+
+[[ $DRY_RUN = "y" ]] && exit
+
+msg "check first"
+[[ ! -d $DIR ]] && msg "no $DIR, quit" && exit 1
+[[ ! -f $IMG ]] && msg "no $IMG, quit" && exit 1
+
+if [[ ! -f $DOCKERFILE ]]
+then
+  msg "generate $DOCKERFILE"
+  cat <<EOF > $DOCKERFILE
+FROM $BASE_IMG
+
+COPY ./root/ /
+# do not modify above lines
+EOF
+fi
+[[ ! -d $DIR/root ]] && mkdir -p $DIR/root
+
+msg "load image $IMG"
+# we assume the docker image already has a name:tag
+image=$($DOCKER load -i $IMG | sed -n 's/Loaded image[^:]*:\s*//p')
+
+msg "rename $image to $BASE_IMG"
+# docker tag will overwrite the old one if already exists
+# so as the docker build, and no need to worry about to clean up
+# just leave it as is, user can run docker prune if they really care
+$DOCKER tag $image $BASE_IMG
+
+msg "check and apply pre-update"
+(cd $DIR && [[ -x pre-update ]] && ./pre-update)
+msg "apply update"
+$DOCKER build -t $image $DIR
+msg "check and apply post-update"
+(cd $DIR && [[ -x post-update ]] && ./post-update)
+
+msg "backup $IMG to $IMG_BACKUP"
+mv $IMG $IMG_BACKUP
+
+msg "save new image"
+$DOCKER save $image | gzip > $IMG
+msg "done: $IMG"

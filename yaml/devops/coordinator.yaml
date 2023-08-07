@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: coordinator
+  namespace: "$NAMESPACE"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coordinator
+  template:
+    metadata:
+      labels:
+        app: coordinator
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+      containers:
+      - name: coordinator
+        image: coordinator:local
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+               fieldPath: metadata.namespace
+        - name: DOCKER_REGISTRY
+          value: "aosp-aic-dockerserver.sh.intel.com:5000/"
+        - name: ANDROID_HOST_IP
+          value: "$ANDROID_HOST_IP"
+        - name: USE_HW_GFX
+          value: "$USE_HW_GFX"
+        - name: IDLE_POD_SURVIVE_TIME
+          value: "300"
+        - name: USE_HOUDINI
+          value: "$USE_HOUDINI"
+        - name: STORAGE_CLASS
+          value: "$STORAGE"
+        - name: USE_DEFAULT_NODE
+          value: "$USE_DEFAULT_NODE"
+        - name: ENABLE_RESOURCE_ALLOCATION
+          value: "true"
+        - name: COTURN_IP
+          value: "$COTURN_IP"
+        - name: HARBOR_PROJECT
+          value: "$HARBOR_PROJECT"
+        - name: REGISTRY_TYPE
+          value: "$REGISTRY_TYPE"
+        - name: REGISTRY_AUTHORIZATION
+          valueFrom:
+            secretKeyRef:
+              name: harbor-key
+              key: KEY
+              optional: true
+        volumeMounts:
+        - name: logs
+          mountPath: /logs
+      volumes:
+      - name: logs
+        persistentVolumeClaim:
+          claimName: logs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator
+  namespace: "$NAMESPACE"
+spec:
+  type: NodePort
+  ports:
+  - name: main
+    port: 8080
+    targetPort: 8080
+    nodePort: 30009
+  selector:
+   app: coordinator

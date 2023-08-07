@@ -1,0 +1,10 @@
+1. Deploy:
+    1) log in to the grafana web page : http://android-cloud.sh.intel.com:32264
+    2)log in to the prometheus web page: http://android-cloud.sh.intel.com:30628
+2 install granafa and prometheus
+    1) kubectl apply -f setup/
+    2) kubectl apply -f prometheus/
+3 the grafana meter has no data to display
+   1)the grafana dispaly data needs to be consistent with the time zone of the deployment machine(android-cloud timezone: CST)
+   2)view time zone :date
+   3)set time zone:timedatectl set-timezone Asia/Shanghai

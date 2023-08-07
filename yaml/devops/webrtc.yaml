@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: webrtc-front-end
+  namespace: "$NAMESPACE"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webrtc-front-end
+  template:
+    metadata:
+      labels:
+        app: webrtc-front-end
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+      initContainers:
+      - name: init-mysql
+        image: curlimages/curl
+        command: ['sh', '-c', 'until curl --http0.9 mysql:3306 -o /dev/null; do echo waiting for mysql; sleep 2; done;']
+      containers:
+      - name: webrtc-front-end
+        image: webrtc-front-end:local
+        securityContext:
+          privileged: true
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+               fieldPath: metadata.namespace
+        - name: PORT_SIGNALING
+          value: "$PORT_SIGNALING"
+        - name: PORT_SIGNALING_HTTPS
+          value: "$PORT_SIGNALING_HTTPS"
+        - name: OWT_SERVER_P2P_IP
+          value: "$OWT_SERVER_P2P_IP"
+        - name: COTURN_IP
+          value: "$COTURN_IP"
+        - name: ANDROID_HOST_IP
+          value: "$ANDROID_HOST_IP"
+        - name: BACKEND_HOST_IP
+          value: "$BACKEND_HOST_IP"
+        - name: WEBSOCKET_HOST_IP
+          value: "$WEBSOCKET_HOST_IP"
+        - name: K8S_ENV_STATELESS
+          value: "true"
+        - name: REGISTRY
+          value: "$REGISTRY"
+        - name: TAG
+          value: "$TAG"
+        volumeMounts:
+        - name: logs
+          mountPath: /logs
+      volumes:
+      - name: logs
+        persistentVolumeClaim:
+          claimName: logs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webrtc-front-end
+  namespace: "$NAMESPACE"
+spec:
+  type: NodePort
+  ports:
+  - name: orignal
+    port: 8000
+    targetPort: 8000
+    nodePort: 30008
+  - name: main
+    port: 8080
+    targetPort: 8080
+    nodePort: 30007
+  selector:
+   app: webrtc-front-end

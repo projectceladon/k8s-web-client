@@ -1,0 +1,14 @@
+{
+  "registry-mirrors": [
+    "https://ustc-edu-cn.mirror.aliyuncs.com"
+  ],
+  "insecure-registries": [
+    "aosp-aic-dockerserver.sh.intel.com:5000",
+    "android-devops-registry.sh.intel.com:5000",
+    "ccr-registry.caas.intel.com"
+  ],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "1024m"
+  }
+}

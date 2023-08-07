@@ -1,0 +1,777 @@
+#!/usr/bin/env bash
+# author: joe.zheng
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+set -e
+
+DOCKER="sudo docker"
+if [[ "$(id -u)" == "0" ]] || id -nG | grep -qw docker; then
+    DOCKER="docker"
+fi
+
+# IP of the primary interface on the host
+DEFAULT_IP=$(ip route get 1 | head -1 | awk '{print $7}')
+DEFAULT_NAME=$(hostname)
+
+EXTERNAL=$DEFAULT_IP                               # external address
+REGISTRY="aosp-aic-dockerserver.sh.intel.com:5000" # Docker registry address
+HARBOR_PROJECT="android"
+REGISTRY_TYPE="docker"
+GFX="sw"                                           # graphic stack
+GFX_OPTS="sw hw"                                   # supported graphic stack
+TAG=${TAG:-latest}                                 # target image tag
+DRY_RUN=n                                          # dry run or not
+IMG_DIR=$(pwd)                                     # image release dir
+WORK_DIR=$(pwd)                                    # work directory
+LOCAL=n                                            # local only, no upload
+DELETE=n                                           # delete the deployment
+INSTANCES=${INSTANCES:-2}                          # android instances
+DEVOPS=n
+PUSH_REGISTRY=n
+HUGE="false"
+USE_THP_LIBC="true"
+CORES_MONOPOLY="1"
+WORKLOAD_FPS="60"
+USE_DEFAULT_NODE="dg1"
+DEFAULT_NODE_OPTS="soft dg1 dg2"
+STORAGE="local"
+STORAGE_OPTS="local rbd cephfs"
+PORT_SIGNALING=${PORT_SIGNALING:-'30000'}
+PORT_SIGNALING_HTTPS=${PORT_SIGNALING_HTTPS:-'30001'}
+PORT_FRONT_END=${PORT_FRONT_END:-'30008'}
+PORT_FRONT_END_HTTPS=${PORT_FRONT_END_HTTPS:-'30005'}
+OWT_SERVER_P2P_IP=${OWT_SERVER_P2P_IP:-"$DEFAULT_IP"}
+START_OWT_SERVER_P2P=${START_OWT_SERVER_P2P:-"true"}
+COTURN_IP=${COTURN_IP:-"$DEFAULT_IP"}
+START_COTURN=${START_COTURN:-"true"}
+ANDROID_HOST_IP=${ANDROID_HOST_IP:-"$DEFAULT_IP"}
+BACKEND_HOST_IP=${BACKEND_HOST_IP:-"$DEFAULT_IP"}
+WEBSOCKET_HOST_IP=${WEBSOCKET_HOST_IP:-"$DEFAULT_IP"}
+CODEC=${CODEC:-"avc"}
+ICE_PORT_BEGIN=${ICE_PORT_BEGIN:-"50000"}
+ICE_PORT_END=${ICE_PORT_END:-"50999"}
+HTTPS_ENABLE=${HTTPS_ENABLE:-"false"}
+STREAMER_HTTPS_ENABLE=${STREAMER_HTTPS_ENABLE:-"false"}
+TELEMETRY_ENABLE="false"
+TRANSFER_DIR="/DCIM"
+MONITORING_ENABLE="false"
+NAMESPACE="default"
+
+function msg {
+    echo "> $@"
+}
+
+function check_num {
+    case $1 in
+    '' | *[!0-9]*)
+        return 1
+        ;;
+    *)
+        return 0
+        ;;
+    esac
+}
+
+function check_multiple {
+    num=$(expr $1 % $2)
+    if [ ${num} -eq 0 ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+function use_namespace(){
+    sed -in "s|\$NAMESPACE|${NAMESPACE}|" $IMG_DIR/$YAML/devops/*.yaml
+    kubectl apply -f $IMG_DIR/$YAML/devops/namespace.yaml
+    sed -in "s|\$NAMESPACE|${NAMESPACE}|" $IMG_DIR/$YAML/ingress/ingress.yaml
+    sed -in "s|\$NAMESPACE|${NAMESPACE}|" $IMG_DIR/$YAML/storage-remote/rbd/pvc-data.yaml
+    sed -in "s|\$NAMESPACE|${NAMESPACE}|" $IMG_DIR/$YAML/storage-remote/cephfs/pvc-data.yaml
+    sed -in "s|\$NAMESPACE|${NAMESPACE}|" $IMG_DIR/$YAML/storage-local/pvc-data.yaml
+}
+
+function usage() {
+    local self=$(basename $0)
+    local domain_name=""
+    local port_signaling=30000
+    local port_signaling_https=30001
+    local port_front_end=30008
+    local port_front_end_https=30005
+    local owt_server_p2p_ip="$DEFAULT_IP"
+    local coturn_ip="$DEFAULT_IP"
+    local use_default_node="$USE_DEFAULT_NODE"
+    cat <<EOF
+Usage: $self [-ci|--coturn-ip <coturn_ip>] [-d <dir>] [-e <addr>] [-f <port_front_end>] [-F <dir>] [-pfeh <port_front_end_https>] [-i <num>] [-ipb|--ice-port-begin <port>] [-ipe|--ice-port-end] [-g <gfx>] [-ps|--port-signaling <port_signaling>] [-psh|--port-signaling-https <port_signaling_https>] [-nsc|--not-start-coturn] [-nso|--not-start-owt-server-p2p] [-r <addr>] [-t <tag>] [-ospi|--owt-server-p2p-ip <owt_server_p2p_ip>]
+  [-D] [-l] [-n] [-h] [--codec <codec>] [-https] [-dthp] [<dir>] [-pro <habor_project>] [-type <registry_type>]
+  Deploy the image release into k8s
+  -ci|--coturn-ip <coturn_ip>: Coturn IP. default: $coturn_ip
+  -d <dir>:  work directory, default: $WORK_DIR
+  -e <addr>: external address, default: $EXTERNAL
+  -i <num>:  instance number, default: $INSTANCES
+  -ipb|--ice-port-begin <port>: ICE port begin. Default: $ICE_PORT_BEGIN
+  -ipe|--ice-port-end <port>: ICE port end. Default: $ICE_PORT_END
+  -f <port_front_end>:  Port front end. default: $port_front_end
+  -F <dir>:  transfer file directory. default: DCIM
+  -pfeh <port_front_end_https>:  Port front end heeps. default: $port_front_end_https
+  -g <gfx>:  graphic stack [$GFX_OPTS], default: $GFX
+  -ps|--port-signaling <port_signaling>: Port signaling. default: $port_signaling
+  -psh|--port-signaling-https <port_signaling_https>: Port signaling https. default: $port_signaling_https
+  -name: under devops configuration, use hostname as entrypoint to cluster nodes
+  -nsc|--not-start-coturn: Not start coturn. Default: $START_COTURN
+  -nso|--not-start-owt-server-p2p: Not start OWT server P2P. Default: $START_OWT_SERVER_P2P
+  -ospi|--owt-server-p2p-ip <owt_server_p2p_ip>: OWT server P2P IP. default: $owt_server_p2p_ip
+  -r <addr>: Docker registry, default: $REGISTRY
+  -t <tag>:  tag to apply, default: $TAG
+  -s:        deploy with devops configuration, default $DEVOPS
+  -st: <storage>  storage mode[$STORAGE_OPTS], default $STORAGE
+  -p:        push Android pod images to docker registry, default $PUSH_REGISTRY
+  -D:        delete deployment, default: $DELETE
+  -l:        local only, default: $LOCAL
+  -n:        dry run, print out information only, default: $DRY_RUN
+  -H:        use huge pages, default: $HUGE
+  -dthp:     Disable Transparent huge pages for Libc, default: $USE_THP_LIBC
+  -h:        print the usage message
+  --codec <codec>:  Codec which is enabled for ICR. e.g. "--codec avc|hevc|av1".  Default: $CODEC
+  -https     Enable HTTPS. Default: $HTTPS_ENABLE
+  <dir>:     image release directory, default: $IMG_DIR
+  -m:        CPU allocate algorithmm, now support pool and monopoly.
+  -ipp       Pool restriction: instances number per pool.
+  -tpp       Pool restriction: threads number per core.
+  -si        Monopoly restriction: shared instances number per core.
+  -cm        Monopoly restriction: cores number monopolized by per instance.
+  -wf        Workload FPS, which is used for setting vsync offset of mutiple instances.
+  -T         Telemetry is enabled for aic streamer
+  -M         Metrics monitoring by prometheus is enabled.
+  -pro       Project of harbor registry
+  -type      Type of registry
+  -ns        use kubenetes namespace 
+Local only:
+  If the "-l" option is enabled, the images will not be uploaded, tag will
+  be overrided from "latest" to "local" to prevent k8s from pulling images,
+  to speed up the deployment and save storage used by Docker registry
+Data sharing:
+  We use data provisioner to setup data volume to support data sharing between
+  instances to save storage and improve performance, as well as ease the user
+  data management, current solution is based on overlayfs, each data has "base"
+  layer and the upper layer which stores the dalta
+  * prepare the "base" data layer, e.g. install app via adb
+  * deploy multiple instances, e.g. 4: $self -i 4
+EOF
+
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+    -ci | --coturn-ip)
+        shift
+        coturn_ip=$1
+        COTURN_IP=$coturn_ip
+        echo "Coturn IP: $COTURN_IP"
+        shift
+        ;;
+    -d)
+        shift
+        WORK_DIR="$(cd $1 && pwd)"
+        shift
+        ;;
+    -e)
+        shift
+        EXTERNAL=$1
+        shift
+        ;;
+    -F)
+        shift
+        TRANSFER_DIR="/$1"
+        shift
+        ;;
+    -f)
+        shift
+        port_front_end=$1
+        if [ ! -n "$port_front_end" ]; then
+            echo "port_front_end is null"
+            exit 1
+        fi
+
+        if [ "$port_front_end" -lt 1 ]; then
+            echo "$port_front_end < 1"
+            exit 1
+        fi
+
+        if [ "$port_front_end" -gt 65535 ]; then
+            echo "$port_front_end > 65535"
+            exit 1
+        fi
+        PORT_FRONT_END=$port_front_end
+        echo "Set PORT_FRONT_END=$port_front_end"
+        shift
+        ;;
+    -pfeh)
+        shift
+        port_front_end_https=$1
+        if [ ! -n "$port_front_end_https" ]; then
+            echo "port_front_end is null"
+            exit 1
+        fi
+
+        if [ $port_front_end_https -lt 1 ]; then
+            echo "$port_front_end_https < 1"
+            exit 1
+        fi
+
+        if [ $port_front_end_https -gt 65535 ]; then
+            echo "$port_front_end_https > 65535"
+            exit 1
+        fi
+        PORT_FRONT_END_HTTPS=$port_front_end_https
+        echo "Set PORT_FRONT_END_HTTPS=$port_front_end_https"
+        shift
+        ;;
+    -i)
+        shift
+        INSTANCES=$1
+        shift
+        ;;
+    -ipb | --ice-port-begin)
+        shift
+        ice_port_begin=$1
+        if [ $ice_port_begin -lt 1 ]; then
+            echo "$ice_port_begin < 1"
+            exit 1
+        fi
+
+        if [ $ice_port_begin -gt 65535 ]; then
+            echo "$ice_port_begin > 65535"
+            exit 1
+        fi
+        ICE_PORT_BEGIN=$ice_port_begin
+        echo "ICE_PORT_BEGIN=$ice_port_begin"
+        shift
+        ;;
+    -ipe | --ice-port-end)
+        shift
+        ice_port_end=$1
+        if [ $ice_port_end -lt 1 ]; then
+            echo "$ice_port_end < 1"
+            exit 1
+        fi
+
+        if [ $ice_port_end -gt 65535 ]; then
+            echo "$ice_port_end > 65535"
+            exit 1
+        fi
+        ICE_PORT_END=$ice_port_end
+        echo "ICE_PORT_END=$ice_port_end"
+        shift
+        ;;
+    -g)
+        shift
+        GFX=$1
+        if echo $GFX_OPTS | grep -v -w $GFX >/dev/null 2>&1; then
+            echo "invalid gfx option: $GFX"
+            usage && exit 1
+        fi
+        shift
+        ;;
+    -ps | --port-signaling)
+        shift
+        port_signaling=$1
+        if [ ! -n "$port_signaling" ]; then
+            echo "port_signaling is null"
+            exit 1
+        fi
+
+        if [ "$port_signaling" -lt 1 ]; then
+            echo "$port_signaling < 1"
+            exit 1
+        fi
+
+        if [ "$port_signaling" -gt 65535 ]; then
+            echo "$port_signaling > 65535"
+            exit 1
+        fi
+        PORT_SIGNALING=$port_signaling
+        echo "Set PORT_SIGNALING=$port_signaling"
+        shift
+        ;;
+    -psh | --port-signaling-https)
+        shift
+        port_signaling_https=$1
+        if [ ! -n "$port_signaling_https" ]; then
+            echo "port_signaling is null"
+            exit 1
+        fi
+
+        if [ "$port_signaling_https" -lt 1 ]; then
+            echo "$port_signaling_https < 1"
+            exit 1
+        fi
+
+        if [ "$port_signaling_https" -gt 65535 ]; then
+            echo "$port_signaling_https > 65535"
+            exit 1
+        fi
+        PORT_SIGNALING_HTTPS=$port_signaling_https
+        echo "Set PORT_SIGNALING_HTTPS=$port_signaling_https"
+        shift
+        ;;
+    -name | --domain-name)
+        shift
+        domain_name=$1
+        if [ ! -n "$domain_name" ]; then
+           echo "domain name is null"
+           exit 1
+        fi
+        OWT_SERVER_P2P_IP=${OWT_SERVER_P2P_NAME:-$domain_name}
+        ANDROID_HOST_IP=${ANDROID_HOST_NAME:-$domain_name}
+        BACKEND_HOST_IP=${BACKEND_HOST_NAME:-$domain_name}
+        WEBSOCKET_HOST_IP=${WEBSOCKET_HOST_NAME:-$domain_name}
+        shift
+        ;;
+    -nsc | --not-start-coturn)
+        START_COTURN="false"
+        echo "START_COTURN=$START_COTURN"
+        shift
+        ;;
+    -nso | --not-start-owt-server-p2p)
+        START_OWT_SERVER_P2P="false"
+        echo "START_OWT_SERVER_P2P=$START_OWT_SERVER_P2P"
+        shift
+        ;;
+    -ospi | --owt-server-p2p-ip)
+        shift
+        owt_server_p2p_ip=$1
+        OWT_SERVER_P2P_IP=$owt_server_p2p_ip
+        echo "OWT server P2P IP: $OWT_SERVER_P2P_IP"
+        shift
+        ;;
+    -r)
+        shift
+        REGISTRY=$1
+        shift
+        ;;
+    -pro)
+        shift
+        HARBOR_PROJECT=$1
+        shift
+        ;;
+    -type)
+        shift
+        REGISTRY_TYPE=$1
+        shift
+        ;;
+    -t)
+        shift
+        TAG=$1
+        shift
+        ;;
+    -l)
+        LOCAL=y
+        shift
+        ;;
+    -s)
+        DEVOPS=y
+        shift
+        ;;
+    -p)
+        PUSH_REGISTRY=y
+        shift
+        ;;
+    -D)
+        DELETE=y
+        shift
+        ;;
+    -n)
+        DRY_RUN=y
+        shift
+        ;;
+    -m)
+        shift
+        CPU_ALLOC_ALGORITHM=$1
+        shift
+        ;;
+    -tpp)
+        shift
+        THREADS_PER_POOL=$1
+        shift
+        ;;
+    -ipp | --instances_per_pool)
+        shift
+        INSTANCE_PER_POOL=$1
+        shift
+        ;;
+    -si)
+        shift
+        SHARED_INSTANCES=$1
+        shift
+        ;;
+    -st)
+        shift
+        STORAGE=$1
+        if echo $STORAGE_OPTS | grep -v -w $STORAGE>/dev/null 2>&1; then
+            echo "invalid storage option: $STORAGE"
+            usage && exit 1
+        fi
+        shift
+        ;;
+    -cm)
+        shift
+        CORES_MONOPOLY=$1
+        shift
+        ;;
+    -H)
+        HUGE="true"
+        shift
+        ;;	
+    -dthp)
+        USE_THP_LIBC="false"
+        shift
+        ;;
+    --codec)
+        shift
+        echo $1
+        if [[ "$1" =~ (avc|hevc|av1) ]]
+        then
+            CODEC=$1
+            echo "Codec: $CODEC"
+        else
+            echo "Unsupported codec: $1"
+            exit -1
+        fi
+        shift
+        ;;
+    -https)
+        HTTPS_ENABLE="true"
+        shift
+        ;;
+    -wf)
+        shift
+        if [ "$#" -lt 1 ]; then
+            usage && exit 1
+        fi
+        if [ "$1" -gt 0 ] 2>/dev/null; then
+            WORKLOAD_FPS=$1
+        else
+            usage && exit 1
+        fi
+        shift
+        ;;
+    -T)
+        TELEMETRY_ENABLE="true"
+        shift
+        ;;
+    -M)
+        MONITORING_ENABLE="true"
+        shift
+        ;;
+    -dn | --default-node)
+        shift
+        use_default_node=$1
+         if echo $DEFAULT_NODE_OPTS | grep -v -w $use_default_node >/dev/null 2>&1; then
+            echo "invalid node option: $DEFAULT_NODE_OPTS"
+            usage && exit 1
+        fi
+
+        USE_DEFAULT_NODE=$use_default_node
+        shift
+        ;;
+    -ns)
+        shift
+        NAMESPACE=$1
+        shift
+        ;;
+    -h) usage && exit ;;
+    *)
+        usage
+        exit 1
+        ;;
+    esac
+done
+
+#Check if aic-manager exist, else re-compile
+if [ ! -f "aic-manager.tar.gz" ]; then
+    echo "Create aic-manager"
+    AIC_MANAGER_WORKDIR="aic-manager" ./aic-build aic-manager
+fi
+
+if [ ! -z "$CPU_ALLOC_ALGORITHM" ]; then
+    if [ "$CPU_ALLOC_ALGORITHM" == "monopoly" ]; then
+        if ! check_num $SHARED_INSTANCES || [ "$SHARED_INSTANCES" -lt 2 ]; then
+            usage && exit
+        fi
+        if [ ! -z "$CORES_MONOPOLY" ]; then
+            if ! check_num $CORES_MONOPOLY || [ "$CORES_MONOPOLY" -lt 1 ]; then
+                usage && exit
+            fi
+        fi
+        if ! check_multiple $INSTANCES $SHARED_INSTANCES; then
+            echo "Instance number should be multiple of shared instances."
+            usage && exit
+        fi
+        ENABLE_CPU_ALLOCATE="true"
+        echo "CPU_ALLOC_ALGORITHM $CPU_ALLOC_ALGORITHM SHARED_INSTANCES $SHARED_INSTANCES CORES_MONOPOLY $CORES_MONOPOLY"
+    elif [ "$CPU_ALLOC_ALGORITHM" == "pool" ]; then
+        if ! check_num $THREADS_PER_POOL || [ "$THREADS_PER_POOL" -lt 1 ]; then
+            usage && exit
+        fi
+        if ! check_num $INSTANCE_PER_POOL || [ "$INSTANCE_PER_POOL" -lt 1 ]; then
+            usage && exit
+        fi
+        if ! check_multiple $INSTANCES $INSTANCE_PER_POOL; then
+            echo "Instance number should be multiple of instances per pool."
+            usage && exit
+        fi
+        ENABLE_CPU_ALLOCATE="true"
+        echo "CPU_ALLOC_ALGORITHM $CPU_ALLOC_ALGORITHM INSTANCES_PER_POOL $INSTANCE_PER_POOL THREADS_PER_POOL $THREADS_PER_POOL"
+    else
+        echo "It doesn't support $CPU_ALLOC_ALGORITHM."
+        usage && exit -1
+    fi
+fi
+
+IMG_DIR=${1:-$IMG_DIR}
+
+# if local only, set special tag to avoid k8s pull the latest image
+[[ $LOCAL = "y" ]] && [[ $TAG = "latest" || -z $TAG ]] && TAG="local"
+
+# release image list
+IMAGES="android aic-manager streamer owt-server-p2p webrtc-front-end"
+[[ $DEVOPS = "y" ]] && IMAGES="aic-manager adb-forward coordinator owt-server-p2p webrtc-front-end"
+
+if [[ -e icr.tar.gz  ]]; then
+    IMAGES="$IMAGES icr"
+fi
+
+# folder to store yaml files
+YAML_ORIG="k8s"
+YAML="$YAML_ORIG-updated"
+APP_DIR="${WORK_DIR}/app/installed"
+
+for v in DOCKER DEFAULT_IP EXTERNAL REGISTRY REGISTRY_TYPE HARBOR_PROJECT LOCAL TAG INSTANCES GFX WORK_DIR \
+    APP_DIR IMG_DIR IMAGES YAML_ORIG YAML DELETE DEVOPS PUSH_REGISTRY \
+    OWT_SERVER_P2P_IP COTURN_IP ANDROID_HOST_IP BACKEND_HOST_IP WEBSOCKET_HOST_IP \
+    CODEC ICE_PORT_BEGIN ICE_PORT_END START_OWT_SERVER_P2P START_COTURN; do
+    eval echo "$v: \${$v}"
+done
+
+[[ $DRY_RUN = "y" ]] && exit
+
+function delete_android_deployment() {
+    android_deps=$(kubectl get deployments.apps 2>/dev/null | awk '{print $1}' | grep android-) || true
+    [[ ! -z $android_deps ]] && kubectl delete deployments.apps $android_deps || true
+}
+
+function delete_test_deployment() {
+    test_deps=$(kubectl get deployments.apps 2>/dev/null | awk '{print $1}' | grep test-) || true
+    [[ ! -z $test_deps ]] && kubectl delete deployments.apps $test_deps || true
+}
+
+function delete() {
+    msg "clean old deployment"
+    delete_android_deployment
+    delete_test_deployment
+    kubectl delete --ignore-not-found -f $IMG_DIR/$YAML/general -f $IMG_DIR/$YAML/devops -f $IMG_DIR/$YAML/ingress
+    kubectl delete --ignore-not-found -f $IMG_DIR/$YAML/prometheus -f $IMG_DIR/$YAML/monitor -f $IMG_DIR/$YAML/prometheus/setup >/dev/null 2>&1 || true
+    kubectl delete --ignore-not-found secrets tls-secret
+}
+
+function dist_delete() {
+    delete
+    msg "clean data"
+    kubectl delete pvc --all
+    kubectl delete pv --all
+    kubectl delete --ignore-not-found -f $IMG_DIR/$YAML/storage-local -f $IMG_DIR/$YAML/storage-remote/rbd -f $IMG_DIR/$YAML/storage-remote/cephfs
+}
+
+function push_images() {
+    PUSH_IMAGES="android manage-android streamer"
+    if [[ -e icr.tar.gz  ]]; then
+        PUSH_IMAGES="$PUSH_IMAGES icr"
+    fi
+    [[ $TAG = "latest" || -z $TAG ]] && TAG="${USER}-$(date +%F-%H-%M)"
+    for i in $PUSH_IMAGES; do
+        if [[ $i = "streamer" ]]; then
+            file=$IMG_DIR/*${i}.tar.gz
+        else
+            file=$IMG_DIR/${i}.tar.gz
+        fi
+        if [[ $REGISTRY_TYPE = "docker" ]]; then
+            new=${REGISTRY}/${i}:${TAG}
+        else
+            new=${REGISTRY}/${HARBOR_PROJECT}/${i}:${TAG}
+        fi
+        msg "load $file"
+        old=$($DOCKER load -i $file | sed -n 's/Loaded image[^:]*:\s*//p')
+        msg "tag $old as $new"
+        $DOCKER tag $old $new
+        msg "push $new to the registry"
+        $DOCKER push $new
+    done
+}
+
+function gen_certs() {
+	HOST=$(hostname)
+	openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout "${HOST}.key" -out "${HOST}.crt" -subj "/CN=${HOST}/O=${HOST}"
+	kubectl create secret tls tls-secret --key "${HOST}.key" --cert "${HOST}.crt"
+}
+
+function ingress_wait(){
+    msg "wait for ingress deployment..."
+    sleep 30
+}
+
+[[ $PUSH_REGISTRY = "y" ]] && push_images && exit
+
+[[ $DELETE = "y" ]] && dist_delete && exit
+
+msg "clean old $YAML, copy from $YAML_ORIG"
+rm -rf $IMG_DIR/$YAML && cp -r $IMG_DIR/$YAML_ORIG $IMG_DIR/$YAML
+
+msg "create necessary folders"
+for d in $WORK_DIR $APP_DIR; do
+    mkdir -p $d
+done
+
+TRANSFER_FILE_DIR="${WORK_DIR}${TRANSFER_DIR}"
+if [ ! -e "$TRANSFER_FILE_DIR" ]; then
+        mkdir ${TRANSFER_FILE_DIR}
+        chmod 777 ${TRANSFER_FILE_DIR}
+fi
+
+msg "load all the images"
+for i in $IMAGES; do
+    if [[ $i = "streamer" ]]; then
+        file=$IMG_DIR/*${i}.tar.gz
+    else
+        file=$IMG_DIR/${i}.tar.gz
+    fi
+    new=${i}:${TAG}
+    if [[ $REGISTRY_TYPE = "docker" ]]; then
+        [[ $LOCAL != "y" ]] && new=${REGISTRY}/$new
+    else
+        [[ $LOCAL != "y" ]] && new=${REGISTRY}/${HARBOR_PROJECT}/$new
+    fi
+
+    msg "load $file"
+    old=$($DOCKER load -i $file | sed -n 's/Loaded image[^:]*:\s*//p')
+    if [ $(echo "$old" | grep -c "aic-streamer") -gt 0 ]; then
+        STREAMER_HTTPS_ENABLE="true"
+        msg "Enable HTTPS for aic-streamer: STREAMER_HTTPS_ENABLE=$STREAMER_HTTPS_ENABLE"
+    fi
+    msg "tag $old as $new"
+    $DOCKER tag $old $new
+    if [[ $LOCAL != "y" ]]; then
+        msg "push $new to the registry"
+        $DOCKER push $new
+    else
+        if [[ $DEVOPS = "y" ]]; then
+            msg "tag $old as ${REGISTRY}/${i}:default"
+            $DOCKER tag $old ${REGISTRY}/${i}:default
+        fi
+    fi
+
+    # update the yaml files acccordingly
+    msg "update yaml files: $i -> $new"
+    sed -Ei "s|image:\s*(.*/)?$i(:.*)?|image: $new|" $IMG_DIR/$YAML/*/*.yaml
+done
+
+msg "update yaml files to expand env vars"
+NODE_IP=$EXTERNAL
+if [[ $GFX = "hw" ]]; then
+    USE_ENCODED_FRAME="true"
+    USE_HW_GFX="true"
+    GPU_NODES=${GPU_NODES:-1}
+fi
+if [[ $HUGE = "true" ]]; then
+    USE_HUGE_PAGE="true"
+fi
+for k in NODE_IP http_proxy no_proxy APP_DIR TRANSFER_DIR TRANSFER_FILE_DIR INSTANCES USE_ENCODED_FRAME USE_HW_GFX GPU_NODES USE_HUGE_PAGE USE_THP_LIBC CPU_ALLOC_ALGORITHM SHARED_INSTANCES CORES_MONOPOLY INSTANCE_PER_POOL THREADS_PER_POOL ENABLE_CPU_ALLOCATE WORKLOAD_FPS USE_DEFAULT_NODE PORT_SIGNALING_HTTPS PORT_SIGNALING PORT_FRONT_END_HTTPS PORT_FRONT_END OWT_SERVER_P2P_IP COTURN_IP ANDROID_HOST_IP BACKEND_HOST_IP WEBSOCKET_HOST_IP REGISTRY_TYPE REGISTRY TAG CODEC ICE_PORT_BEGIN ICE_PORT_END HTTPS_ENABLE STREAMER_HTTPS_ENABLE TELEMETRY_ENABLE MONITORING_ENABLE STORAGE; do
+    eval v=\${$k}
+    msg "\$$k -> $v"
+    sed -i "s|\$$k|$v|" $IMG_DIR/$YAML/*/*.yaml
+done
+if [[ $START_OWT_SERVER_P2P == "false" ]]; then
+    if [[ $STREAMER_HTTPS_ENABLE == "true" ]]; then
+        msg "$OWT_SERVER_P2P_IP:$PORT_SIGNALING_HTTPS replace owt:8095 in owt.yaml"
+        sed -i "s|http://owt:8095|https://$OWT_SERVER_P2P_IP:$PORT_SIGNALING_HTTPS|g" $IMG_DIR/$YAML/*/*.yaml
+    else
+        msg "$OWT_SERVER_P2P_IP:$PORT_SIGNALING replace owt:8095 in owt.yaml"
+        sed -i "s|owt:8095|$OWT_SERVER_P2P_IP:$PORT_SIGNALING|g" $IMG_DIR/$YAML/*/*.yaml
+    fi
+
+else
+    if [[ $STREAMER_HTTPS_ENABLE == "true" ]]; then
+        msg "https://owt:8096 replace http://owt:8095 in owt.yaml"
+        sed -i "s|http://owt:8095|https://owt:8096|g" $IMG_DIR/$YAML/*/*.yaml
+    fi
+fi
+
+# Cleanup old deployment
+delete
+
+
+# Monitor compoment deployment
+msg "apply new deployment"
+if [[ $MONITORING_ENABLE == "true" ]]; then
+    msg "apply prometheus monitoring"
+    kubectl apply -f $IMG_DIR/$YAML/prometheus/setup
+    kubectl apply -f $IMG_DIR/$YAML/prometheus/
+    kubectl apply -f $IMG_DIR/$YAML/monitor/
+fi
+
+# DevOps deployment
+use_namespace
+if [[ $DEVOPS = "y" ]]; then
+    sed -in "s|aosp-aic-dockerserver.sh.intel.com:5000|${REGISTRY}|" $IMG_DIR/$YAML/devops/coordinator.yaml
+    sed -in "s|\$HARBOR_PROJECT|${HARBOR_PROJECT}|" $IMG_DIR/$YAML/devops/coordinator.yaml
+    sed -in "s|\$REGISTRY_TYPE|${REGISTRY_TYPE}|" $IMG_DIR/$YAML/devops/coordinator.yaml
+    case $STORAGE in
+        rbd)
+            STORAGE_YAML=$IMG_DIR/$YAML/storage-remote/rbd
+            ;;
+        cephfs)
+            STORAGE_YAML=$IMG_DIR/$YAML/storage-remote/cephfs
+            ;;
+        *)
+            STORAGE_YAML=$IMG_DIR/$YAML/storage-local
+    esac
+    VERSION=$(kubelet --version | awk '{print $2}' | sed -e "s/^v//"|awk -F. '{print $2}')
+    if [ $VERSION -gt 19 ]
+    then
+        kubectl apply -f $IMG_DIR/$YAML/devops -f $IMG_DIR/$YAML/ingress/controller-new.yaml -f $STORAGE_YAML
+        ingress_wait
+        kubectl apply -f $IMG_DIR/$YAML/ingress/admission.yaml
+    else
+        kubectl apply -f $IMG_DIR/$YAML/devops -f $IMG_DIR/$YAML/ingress/controller.yaml -f $STORAGE_YAML
+        ingress_wait
+        kubectl delete -A ValidatingWebhookConfiguration ingress-nginx-admission
+    fi
+    gen_certs      
+    kubectl apply -f $IMG_DIR/$YAML/ingress/ingress.yaml
+    exit
+fi
+
+# StatefulSet deployment
+if [[ $START_OWT_SERVER_P2P == "true" ]]; then
+    msg "apply owt deployment"
+    kubectl apply -f $IMG_DIR/$YAML/general/owt.yaml
+fi
+
+if [[ $START_COTURN == "true" ]]; then
+    msg "apply coturn deployment"
+    kubectl apply -f $IMG_DIR/$YAML/general/coturn.yaml
+fi
+kubectl apply -f $IMG_DIR/$YAML/general/android.yaml -f $IMG_DIR/$YAML/general/ds-aic-manager.yaml -f $IMG_DIR/$YAML/general/webrtc.yaml -f $IMG_DIR/$YAML/storage-local

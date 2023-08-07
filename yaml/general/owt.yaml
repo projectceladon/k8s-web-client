@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: owt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: owt
+  template:
+    metadata:
+      labels:
+        app: owt
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+      containers:
+      - name: owt
+        image: owt-server-p2p:local
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: owt
+spec:
+  type: NodePort
+  ports:
+  - name: main
+    port: 8095
+    targetPort: 8095
+    nodePort: $PORT_SIGNALING
+  - name: https
+    port: 8096
+    targetPort: 8096
+    nodePort: $PORT_SIGNALING_HTTPS
+  selector:
+   app: owt

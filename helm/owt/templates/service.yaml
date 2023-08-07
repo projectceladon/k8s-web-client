@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "owt.fullname" . }}
+  labels:
+    {{- include "owt.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: main
+      targetPort: {{ .Values.service.port }} 
+      nodePort: {{ .Values.service.nodePort }}
+      protocol: TCP
+      port: {{ .Values.service.port }} 
+    - name: https
+      targetPort: {{ .Values.service.port | add1 }}
+      nodePort: {{ .Values.service.nodePort | add1 }}
+      protocol: TCP
+      port: {{ .Values.service.port | add1 }}
+  selector:
+    {{- include "owt.selectorLabels" . | nindent 4 }}

@@ -1,0 +1,103 @@
+<!--
+ Copyright (C) <2018> Intel Corporation
+
+ SPDX-License-Identifier: Apache-2.0
+-->
+
+<!DOCTYPE html>
+
+<head>
+  <link rel="shortcut icon" href="#">
+  <title>Intel&reg; Collaboration Suite for WebRTC Cloud Gaming Sample</title>
+  <style>
+    body {
+      margin: 0;
+    }
+    video {
+      height: 100vh;
+      width: 100%;
+      object-fit: fill;
+    }
+    video::not(:root):fullscreen {
+      object-fit: fill;
+    }
+    .debug-ctrl {
+      border: 1px solid #e0e0e0;
+      background: white;
+      height: 100vh;
+      padding: 10px 40px;
+    }
+    .debug-ctrl div {
+      display: flex;
+      margin: 5px 0;
+      align-items: center;
+    }
+    div#test-container {
+      height: 100vh;
+      display: flex;
+      justify-content: space-between;
+      overflow-y: hidden;
+    }
+    div#test-body {
+      display: none;
+      width: 100%;
+    }
+    label, select {
+      width: 100px;
+    }
+  </style>
+</head>
+<body>
+  <div id="test-container">
+    <video id="remoteVideo" playsinline autoplay muted></video>
+    <div id="test-body">
+      <div class="debug-ctrl">
+        <label>ICR:</label>
+        <div>
+          <select id="icr-select"><option value="">Blank</option><option value="1">On</option><option value="0">Off</option></select>
+          <button id="send-icr" disabled>send</button>
+        </div>
+        <label>Bitrate:</label>
+        <div>
+          <select id="bit-select"><option value="">Blank</option></select>
+          <button id="send-bit" disabled>send</button>
+        </div>
+        <label>FPS:</label>
+        <div>
+          <select id="fps-select"><option value="">Blank</option><option value="30">30</option><option value="60">60</option></select>
+          <button id="send-fps" disabled>send</button>
+        </div>
+        <label>Resolution:</label>
+        <div>
+          <select id="res-select"><option value="">Blank</option></select>
+          <button id="send-res" disabled>send</button>
+        </div>
+        <label>ICR manual mode:</label>
+        <div>
+          <select id="mode-select"><option value="">Blank</option><option value="1">Enable</option><option value="0">Disable</option></select>
+          <button id="send-mode" disabled>send</button>
+        </div>
+        <label>CMD:</label>
+        <div>
+          <button id="cmd-back">back</button>
+        </div>
+        <div>
+          <button id="cmd-am">am start settings</button>
+        </div>
+        <div>
+          <button id="cmd-pm">pm list packages</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="js/jquery-1.10.2.min.js" type="text/javascript"></script>
+  <script src="js/utils.js" type="text/javascript"></script>
+  <script src="js/socket.io.js" type="text/javascript"></script>
+  <script src="js/adapter.js" type="text/javascript"></script>
+  <script src="js/sc.websocket.js" type="text/javascript"></script>
+  <script src="js/owt.js" type="text/javascript"></script>
+  <script src="js/gaming.js" type="text/javascript"></script>
+  <script src="js/gamepadTool.js" type="text/javascript"></script>
+  <script src="js/gpsUtil.js" type="text/javascript"></script>
+  <script src="js/keyboardTools.js" type="text/javascript"></script>
+</body>

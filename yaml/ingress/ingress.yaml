@@ -1,0 +1,42 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress
+  namespace: "$NAMESPACE"
+  annotations:
+    ingressClassName: nginx
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    nginx.ingress.kubernetes.io/proxy-body-size: 10240m
+spec:
+  tls:
+    - secretName: tls-secret
+  defaultBackend:
+      service:
+        name: webrtc-front-end
+        port: 
+          number: 8080
+  rules:
+    - http:
+        paths:
+          - path: /backend/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: webrtc-front-end
+                port:
+                  number: 8080
+          - path: /coordinator/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: coordinator
+                port:
+                  number: 8080
+          - path: /owt/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: owt
+                port:
+                  number: 8095
+

@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: adb-forward
+  namespace: "$NAMESPACE"
+spec:
+  selector:
+    matchLabels:
+      app: adb-forward
+  template:
+    metadata:
+      labels:
+        app: adb-forward
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: NODE-type
+                operator: In
+                values:
+                - test
+      hostNetwork: true
+      containers:
+      - name: adb-forward
+        image: adb-forward:local
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            memory: "100Mi"
+          limits:
+            memory: "4Gi"

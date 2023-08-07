@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# author: joe.zheng
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+set -e
+
+function msg {
+  echo "> $@"
+}
+
+function usage() {
+  local self=`basename $0`
+  cat <<EOF
+Usage: $self [-r <rel>] [-i <img>] [-o <out>] [-n] [-h] [<aic>]
+  Generate extenal release package
+
+  it requires three files as input: rel, img and aic
+
+  -r <rel>: release package, default: $REL_PKG
+  -i <img>: image package, default: $IMG_PKG
+  -o <out>: output package, default: $OUT_PKG
+  -n:       dry run, print out information only, default: $DRY_RUN
+  -h:       print the usage message
+  <aic>:    aic package, default: $AIC_PKG
+EOF
+
+}
+
+WORK_DIR=${ANDROID_PRODUCT_OUT:-$(pwd)}
+ALL_AIC_PKG=($WORK_DIR/cic_cloud*.tar.gz)
+AIC_PKG=${ALL_AIC_PKG[-1]}       # not always correct to get the last one
+REL_PKG=$WORK_DIR/release.tar.gz
+IMG_PKG=$WORK_DIR/image.tar.gz
+
+OUT_PKG=$WORK_DIR/external-release.tar.gz
+DRY_RUN=n
+
+REL_NAME=release
+AIC_NAME=aic
+IMG_NAME=image
+
+while getopts ":hni:r:o:" opt
+do
+  case $opt in
+    i ) IMG_PKG=$OPTARG;;
+    r ) REL_PKG=$OPTARG;;
+    o ) OUT_PKG=$OPTARG;;
+    n ) DRY_RUN=y;;
+    h ) usage && exit;;
+    * ) usage && exit 1;;
+  esac
+done
+shift $((OPTIND-1))
+
+AIC_PKG=${1:-$AIC_PKG}
+
+for v in DRY_RUN WORK_DIR REL_PKG IMG_PKG AIC_PKG OUT_PKG
+do
+  eval echo "$v: \${$v}"
+done
+
+[[ $DRY_RUN = "y" ]] && exit
+
+
+TMP_DIR=$(mktemp -d -p $WORK_DIR)
+# clean up when exit
+trap "rm -rf $TMP_DIR" EXIT
+
+for i in $REL_PKG $IMG_PKG $AIC_PKG
+do
+  msg "extract $i to $TMP_DIR"
+  tar xzf $i -C $TMP_DIR
+done
+
+REL_DIR=$TMP_DIR/$REL_NAME
+IMG_DIR=$TMP_DIR/$IMG_NAME
+
+for i in aic-manager android
+do
+  msg "deploy $i image"
+  f=${i}.tar.gz
+  ln $TMP_DIR/$f $REL_DIR/$i/$f
+  ln $TMP_DIR/$f $IMG_DIR/$f
+done
+
+msg "deploy update folder"
+cp -r $TMP_DIR/update $REL_DIR
+cp -r $TMP_DIR/update $IMG_DIR
+
+msg "remove files for external release"
+rm -rf $REL_DIR/streamer/libs/linux/lib{boost_,owt}*
+# remove all except Dockerfile
+mv $REL_DIR/owt-server-p2p $REL_DIR/.todo \
+  && mkdir -p $REL_DIR/owt-server-p2p \
+  && mv $REL_DIR/.todo/Dockerfile $REL_DIR/owt-server-p2p \
+  && rm -rf $REL_DIR/.todo
+rm -rf $REL_DIR/webrtc-front-end/js/{jquery-,adapter-,socket.io}*.js
+rm -rf $REL_DIR/k8s/monitor
+rm -rf $REL_DIR/k8s/storage-local/rancher-local-path-storage.yaml
+rm -rf $REL_DIR/k8s/storage-remote
+if [[ -f $REL_DIR/$AIC_NAME/manifest.xml ]]
+then
+  msg "AIC source code provided, remove binaries"
+  rm -rf $REL_DIR/{android,aic-manager}
+fi
+
+PKG_FILE=ext-rel.tar.gz
+msg "compressing output package"
+(cd $TMP_DIR && tar czf $PKG_FILE --exclude-vcs $REL_NAME $IMG_NAME)
+mv $TMP_DIR/$PKG_FILE $OUT_PKG
+
+msg "done: $OUT_PKG"
+
+# the $TMP_DIR will be removed automatically
