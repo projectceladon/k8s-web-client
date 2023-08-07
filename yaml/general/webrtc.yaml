@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: webrtc-front-end
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webrtc-front-end
+  template:
+    metadata:
+      labels:
+        app: webrtc-front-end
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+      containers:
+      - name: webrtc-front-end
+        image: webrtc-front-end:local
+        env:
+        - name: OWT_SERVER_P2P_IP
+          value: "$OWT_SERVER_P2P_IP"
+        - name: COTURN_IP
+          value: "$COTURN_IP"
+        - name: ANDROID_HOST_IP
+          value: "$ANDROID_HOST_IP"
+        - name: BACKEND_HOST_IP
+          value: "$BACKEND_HOST_IP"
+        - name: WEBSOCKET_HOST_IP
+          value: "$WEBSOCKET_HOST_IP"
+        - name: K8S_ENV
+          value: "true"
+        - name: PORT_SIGNALING
+          value: "$PORT_SIGNALING"
+        - name: PORT_SIGNALING_HTTPS
+          value: "$PORT_SIGNALING_HTTPS"
+        - name: HTTPS_ENABLE
+          value: "$HTTPS_ENABLE"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webrtc-front-end
+spec:
+  type: NodePort
+  ports:
+  - name: main
+    port: 8000
+    targetPort: 8000
+    nodePort: $PORT_FRONT_END
+  - name: main-https
+    port: 8001
+    targetPort: 8001
+    nodePort: $PORT_FRONT_END_HTTPS
+  selector:
+   app: webrtc-front-end

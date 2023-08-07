@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# author: joe.zheng
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+# I am serious
+set -e
+
+function msg {
+  echo "> $@"
+}
+
+function usage() {
+  local self=`basename $0`
+  cat <<EOF
+Usage: $self [-d] [-a] [-f] [-h] [-w] [-n <name>] [-o <dir>] [-t <tag>] [-S <type>] [<src>]
+  Generate image package from release package
+
+  -d:        dry run, output information only, default: $DRY_RUN
+  -f:        force removal, default: $FORCE
+  -n <name>: base name of the package file, default: $PKG_NAME
+  -o <dir>:  output directory, default: $OUT_ROOT
+  -t <tag>:  tag to apply, default: $TAG
+  -S <type>: type of aic cloud,  default: $type, 0/1, default; 2, esc(obsolete); 3, aic; 4, dg2;
+  -y:        Use external ICR instead of Titan: $ICR_ON
+  -w:        Use ai dispatcher for remote inference $AI_RI_ON
+  -z:        Enable internal docker registry instead of opensource dockerhub
+  -a:        Use Android Cloud(DevOps): $AC_ON
+  -h:        print the usage message
+  <src>:     release package directory, default: $SRC_DIR
+
+  The result will be in the output directory, including:
+  * a folder named $OUT_NAME
+  * a compressed package file of the above
+
+  They need to be removed first if already exist
+EOF
+
+}
+
+function apt_server_setup () {
+  if [[ ! -z `$DOCKER ps -a | grep -i local-apt` ]]; then
+    $DOCKER stop local-apt
+    $DOCKER rm local-apt
+    $DOCKER rmi apt-webserver
+  fi
+  $DOCKER build $(env | grep -E '(_proxy=|_PROXY)' | sed 's/^/--build-arg /') -f $1/Dockerfile -t apt-webserver $1
+  $DOCKER network create apt || true
+  $DOCKER create --network=apt --name=local-apt apt-webserver
+  $DOCKER start local-apt
+  CUSTOM_APT=`$DOCKER inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' local-apt`
+}
+
+DOCKER="sudo docker"
+if [[ "$(id -u)" == "0" ]] || id -nG | grep -qw docker; then
+  DOCKER="docker"
+fi
+
+TAG=${TAG:-latest}  # load from environment if any
+TYPE=0
+FORCE=n
+DRY_RUN=n
+AC_ON=n
+PKG_NAME=image
+TOP_ROOT=${ANDROID_BUILD_TOP:-$(pwd)}
+SRC_ROOT=${ANDROID_PRODUCT_OUT:-$TOP_ROOT}
+SRC_NAME=release
+SRC_DIR=$SRC_ROOT/$SRC_NAME
+OUT_ROOT=$SRC_ROOT
+OUT_NAME=image
+OUT_DIR=$OUT_ROOT/$OUT_NAME
+
+while getopts ":dfahyzwn:o:t:S:" opt
+do
+  case $opt in
+    d ) DRY_RUN=y;;
+    f ) FORCE=y;;
+    n ) PKG_NAME=$OPTARG;;
+    o ) OUT_ROOT=$OPTARG;;
+    t ) TAG=$OPTARG;;
+    S ) TYPE=$OPTARG;;
+    y ) ICR_ON=y;;
+    w ) AI_RI_ON=y;;
+    z ) INTERNAL_REGISTRY=1;;
+    a ) AC_ON=y;;
+    h ) usage && exit;;
+    * ) usage && exit 1;;
+  esac
+done
+shift $((OPTIND-1))
+
+SRC_ROOT=${1:-$SRC_ROOT}
+
+PKG_FILE=${PKG_NAME}.tar.gz
+OUT_DIR=$OUT_ROOT/$OUT_NAME
+OUT_PKG=$OUT_ROOT/$PKG_FILE
+
+# release image list
+IMAGESDEFAULT="adb-forward coordinator manage-android webrtc-front-end owt-server-p2p streamer"
+IMAGESESC="adb-forward coordinator manage-android webrtc-front-end owt-server-p2p esc-streamer"
+IMAGESAIC="adb-forward coordinator manage-android webrtc-front-end owt-server-p2p aic-streamer"
+IMAGESDG2="adb-forward coordinator manage-android webrtc-front-end owt-server-p2p streamer texture-service"
+YAML="k8s"     # folder to store yaml files
+TOOL="tool"    # folder to store tools
+
+# Enable ICR
+if [[ $ICR_ON == "y" ]]; then
+    IMAGESDG2="$IMAGESDG2 encoder"
+fi
+
+if [[ $AI_RI_ON == "y" ]]; then
+    IMAGESDG2="$IMAGESDG2 ai-dispatcher"
+fi
+
+# Switch to internal docker registry
+# Set if -z option is passed
+if [[ $INTERNAL_REGISTRY == "1" ]]; then
+  find ./release/. -iname Dockerfile -exec sed -i "s/FROM\ ubuntu\:20\.04/FROM\ cache\-registry\.caas\.intel\.com\/cache\/library\/ubuntu\:20\.04/g"  {} \;
+  find ./release/. -iname Dockerfile -exec sed -i "s/FROM\ ubuntu\:bionic/FROM\ cache\-registry\.caas\.intel\.com\/cache\/library\/ubuntu\:bionic/g"  {} \;
+  find ./release/. -iname Dockerfile -exec sed -i "s/FROM\ node\:10/FROM\ cache\-registry\.caas\.intel\.com\/cache\/library\/node\:10/g"  {} \;
+fi
+
+for v in DOCKER FORCE DRY_RUN TAG TOP_ROOT SRC_ROOT SRC_DIR OUT_ROOT OUT_DIR \
+         PKG_NAME OUT_PKG
+do
+  eval echo "$v: \${$v}"
+done
+
+[[ $DRY_RUN = "y" ]] && exit
+
+msg "clean up output directory first: $OUT_ROOT"
+for i in $OUT_DIR $OUT_PKG
+do
+  if [[ -e $i ]]; then
+    if [[ $FORCE = "y" ]]; then
+      rm -rf $i
+    else
+      read -p "delete $i? y/N: " result
+      if [[ $result = "y" ]]; then
+        rm -rf $i
+      else
+        msg "can not continue, quit"
+        exit
+      fi
+    fi
+  fi
+done
+
+mkdir -p $OUT_DIR
+
+# Use Android Cloud(DevOps)
+if [[ $AC_ON == "y" ]]; then
+  tar xzf cic*-aic-*.tar.gz -C $OUT_DIR
+
+  msg "copy update-android from $SRC_DIR to webrtc-front-end"
+  cp $SRC_DIR/$TOOL/update-android $SRC_DIR/webrtc-front-end/www
+
+  msg "copy update from $OUT_DIR to $SRC_DIR"
+  cp -r $OUT_DIR/update $SRC_DIR/webrtc-front-end/www
+fi
+
+function on_err() {
+  msg "oops, clean up before exit!"
+  rm -rf $OUT_DIR $OUT_PKG
+}
+trap on_err ERR
+
+msg "copy files from $SRC_DIR to $OUT_DIR"
+cp -r $SRC_DIR/$TOOL/{update-android,setup-cluster,deploy-to-k8s,aic-cloud,setup-data,deploy-prometheus} $OUT_DIR
+cp -rP $SRC_DIR/$YAML $OUT_DIR
+
+msg "build docker images from $SRC_DIR to $OUT_DIR"
+
+case $TYPE in
+   [01] ) IMAGES=$IMAGESDEFAULT;;
+   2 ) IMAGES=$IMAGESESC;;
+   3 ) IMAGES=$IMAGESAIC;;
+   4 ) IMAGES=$IMAGESDG2;;
+   * ) echo "no type available" && exit 1;;
+esac
+
+# Setup apt-server
+#apt_server_setup $SRC_DIR/apt
+
+
+for i in $IMAGES
+do
+
+if [[ $i == "streamer" || $i == "encoder" ]]; then
+  msg "build docker image for $i"
+  if [[ $i == "streamer" ]]; then
+    config="streamer"
+    dockerfile=""
+    tag="streamer"
+  else
+    config="encoder"
+    dockerfile="selfbuild-prodkmd"
+    tag="encoder"
+  fi
+
+  $DOCKER build --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy --build-arg no_proxy="$CUSTOM_APT" --file $SRC_DIR/ga/docker/$config/ubuntu22.04/$dockerfile/Dockerfile -t $tag:$TAG $SRC_DIR/ga
+
+  msg "save docker image $tag:$TAG"
+  $DOCKER save $tag:$TAG | gzip > $OUT_DIR/$tag.tar.gz
+else
+  msg "build docker image for $i"
+
+  buildargs="--build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy"
+  if [[ $i == "ai-dispatcher" ]]; then
+    buildargs="$buildargs --build-arg no_proxy=localhost"
+  fi
+
+  $DOCKER build $buildargs -t $i:$TAG $SRC_DIR/$i
+  msg "save docker image $i:$TAG"
+  $DOCKER save $i:$TAG | gzip > $OUT_DIR/$i.tar.gz
+fi
+
+  new=${i}:${TAG}
+  msg "update yaml files: $i -> $new"
+  sed -Ei "s|image:\s*(.*/)?$i(:.*)?|image: $new|" $OUT_DIR/$YAML/*/*.yaml
+done
+
+msg "compressing $OUT_DIR"
+(cd $OUT_ROOT && tar czf $PKG_FILE --exclude-vcs $OUT_NAME)
+msg "done: $OUT_PKG"

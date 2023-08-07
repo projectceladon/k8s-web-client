@@ -1,0 +1,35 @@
+From 57ae81e6f2c3f0aeec2612c7b1a4be1784f143ae Mon Sep 17 00:00:00 2001
+From: Chaolun Yu <chaolunx.yu@intel.com>
+Date: Wed, 7 Sep 2022 15:24:09 +0800
+Subject: [PATCH] Custom update
+
+---
+ peerserver.js | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/peerserver.js b/peerserver.js
+index eaa49bc..1f43938 100644
+--- a/peerserver.js
++++ b/peerserver.js
+@@ -18,8 +18,8 @@ var httpsOptions = {
+ var app = require('express')();
+ var server = app.listen(config.port.plain);
+ var servers = require("https").createServer(httpsOptions, app).listen(config.port.secured);
+-var io = require('socket.io').listen(server);
+-var ios = require('socket.io').listen(servers);
++var io = require('socket.io').listen(server,{'pingInterval':2000, 'pingTimeout':2000});
++var ios = require('socket.io').listen(servers,{'pingInterval':2000, 'pingTimeout':2000});
+ 
+ var sessionMap = {};  // Key is uid, and value is session object.
+ 
+@@ -124,6 +124,7 @@ function onConnection(socket){
+     socket.on(forwardEvents[i],(function(i){
+       return function(data, ackCallback){
+         data.from=socket.user.id;
++        console.log('Received '+forwardEvents[i]+': '+JSON.stringify(data));
+         var to=data.to;
+         delete data.to;
+         emitChatEvent(to,forwardEvents[i],data,function(){
+-- 
+2.34.1
+

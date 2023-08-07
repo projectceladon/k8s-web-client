@@ -1,0 +1,1249 @@
+#!/usr/bin/env bash
+# author: joe.zheng
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+set -e
+
+SELF="$(basename $0)"
+SELF_DIR="$(dirname "${BASH_SOURCE[0]}")"
+
+DATA_PROVISIONER="$SELF_DIR/setup-data"
+AIC_INSTALLER="$SELF_DIR/aic"           # mandatory
+
+DOCKER="sudo docker"
+if [[ "$(id -u)" == "0" ]] || id -nG | grep -qw docker; then
+    DOCKER="docker"
+fi
+
+# IP of the primary interface on the host
+DEFAULT_IP=$(ip route get 1 | head -1 | awk '{print $7}')
+
+PORT_SIGNALING=${PORT_SIGNALING:-'8095'}
+PORT_SIGNALING_HTTPS=${PORT_SIGNALING_HTTPS:-'8096'}
+PORT_FRONT_END=${PORT_FRONT_END:-'30008'}
+PORT_FRONT_END_HTTPS=${PORT_FRONT_END_HTTPS:-'30005'}
+OWT_SERVER_P2P_IP=${OWT_SERVER_P2P_IP:-"$DEFAULT_IP"}
+START_OWT_SERVER_P2P=${START_OWT_SERVER_P2P:-"true"}
+COTURN_IP=${COTURN_IP:-"$DEFAULT_IP"}
+START_COTURN=${START_COTURN:-"true"}
+HTTPS_ENABLE=${HTTPS_ENABLE:-"false"}
+
+TAG=${TAG:-alpha} # load from environment if any
+IMAGESDEFAULT="coturn owt-server-p2p webrtc-front-end streamer"
+IMAGESESC="coturn owt-server-p2p webrtc-front-end esc-streamer"
+IMAGESAIC="coturn owt-server-p2p webrtc-front-end aic-streamer"
+IMAGESDG2="coturn owt-server-p2p webrtc-front-end streamer texture-service"
+IMAGES="coturn owt-server-p2p webrtc-front-end encoder streamer aic-streamer texture-service ai-dispatcher"
+IMAGESALL="coturn owt-server-p2p webrtc-front-end encoder streamer aic-streamer texture-service ai-dispatcher"
+WORK_DIR="$(pwd)/workdir"
+MAX_CONCURRENT_USER_NUM=${MAX_CONCURRENT_USER_NUM:-'8'}
+CONCURRENT_USER_PKG_DIR="$(pwd)/update/pkg-enabled.d/101-concurrent-multi-user/"
+ICR_INTERNAL_LOCAL_PROP_FILE_PATH="$(pwd)/workdir/data0/local.prop"
+
+function msg {
+    echo "> $@"
+}
+
+function err() {
+    echo "> $@" >&2
+}
+
+function configure_display() {
+
+    local config=$1
+    echo "Selected config: $config"
+
+case "$config" in
+    0)
+        size="1280x720"
+        icr_fr="30"
+        codec="avc"
+        abit="3.3"
+        mbit="6.6"
+        ;;
+    1)
+        size="1280x720"
+        icr_fr="60"
+        codec="avc"
+        abit="6.6"
+        mbit="13.2"
+        ;;
+    2)
+        size="1920x1080"
+        icr_fr="30"
+        codec="avc"
+        abit="8"
+        mbit="16"
+        ;;
+    3)
+        size="1920x1080"
+        icr_fr="60"
+        codec="avc"
+        abit="16"
+        mbit="32"
+        ;;
+    4)
+        size="1280x720"
+        icr_fr="30"
+        codec="hevc"
+        abit="2.3"
+        mbit="4.6"
+        ;;
+    5)
+        size="1280x720"
+        icr_fr="60"
+        codec="hevc"
+        abit="4.6"
+        mbit="9.2"
+        ;;
+    6)
+        size="1920x1080"
+        icr_fr="30"
+        codec="hevc"
+        abit="5.6"
+        mbit="11.2"
+        ;;
+    7)
+        size="1920x1080"
+        icr_fr="60"
+        codec="hevc"
+        abit="11.2"
+        mbit="22.4"
+        ;;
+    8)
+        size="1280x720"
+        icr_fr="30"
+        codec="av1"
+        abit="2.3"
+        mbit="4.6"
+        ;;
+    9)
+        size="1280x720"
+        icr_fr="60"
+        codec="av1"
+        abit="4.6"
+        mbit="9.2"
+        ;;
+    10)
+        size="1920x1080"
+        icr_fr="30"
+        codec="av1"
+        abit="5.6"
+        mbit="11.2"
+        ;;
+    11)
+        size="1920x1080"
+        icr_fr="60"
+        codec="av1"
+        abit="11.2"
+        mbit="22.4"
+        ;;
+    *) echo "no such option: $config" && exit 1 ;;
+        esac
+
+echo "========================"
+echo "Display Config  "
+echo "========================"
+echo "size         : $size"
+echo "frame        : $icr_fr"
+echo "codec        : $codec"
+echo "avg bit rate : $abit"
+echo "max bit rate : $mbit"
+echo "========================"
+}
+
+function main() {
+    local help=$(
+        cat <<EOF
+Usage: $self COMMAND [OPTIONS] [ARG...]
+  Manage aic for cloud
+
+Commands:
+  install    install
+  uninstall  uninstall
+  start      start
+  stop       stop
+  info       show useful information
+
+Options:
+  -h:        print the usage message
+
+Run "$SELF COMMAND -h" for more information of a command
+EOF
+    )
+
+    local cmd=$1
+    if [[ -n $cmd ]]; then
+        shift
+    else
+        echo "$help"
+        exit 1
+    fi
+
+    case $cmd in
+    install | uninstall | start | stop | info)
+        dumpvars "SELF SELF_DIR DEFAULT_IP PORT_SIGNALING PORT_SIGNALING_HTTPS PORT_FRONT_END PORT_FRONT_END_HTTPS\
+                AIC_INSTALLER DATA_PROVISIONER DOCKER TAG IMAGES cmd"
+        if [[ ! -f "$AIC_INSTALLER" ]]; then
+            err "can't find $AIC_INSTALLER, abort"
+            exit 1
+        fi
+        $cmd $@
+        ;;
+    help | -h) echo "$help" && exit ;;
+    *) echo "no such command: $cmd" && exit 1 ;;
+    esac
+
+    msg "done"
+}
+
+function install() {
+    local cfg="-d,none,-e,-b,5590,-l,server"
+    local dir="$WORK_DIR"
+    local img="$(pwd)"
+    local num=1
+    local user=1
+    local type=0
+    local size="1280x720"
+    local update="n"
+    local gfx="hw"
+    local stream_encoded_mode="false"
+    local gfx_opts="sw hw host"
+    local ip="$DEFAULT_IP"
+    local GPU_NODES=${GPU_NODES:-$(find /dev/dri -iname "renderD*" | wc | awk '{print $1}')}
+    local AI_RI_ON="false"
+    local input_num=2
+    local huge="false"
+    local codec="avc"
+    local ice_port_begin=50000
+    local ice_port_end=50999
+    local port_signaling=8095
+    local port_signaling_https=8096
+    local port_front_end=30008
+    local port_front_end_https=30005
+    local TELEMETRY_PORT="8889"
+    local telemetry_enable="false"
+    local owt_server_p2p_ip="$DEFAULT_IP"
+    local coturn_ip="$DEFAULT_IP"
+    local qsv_enable="false"
+    local setup_data="false"
+    local sid_for_measure_latency=-1
+    local gop_for_measure_latency=4800
+    local icr_start_immediately="false"
+    local renderfps_enc=1
+    local icr_fr=30
+    local disable_drc=0
+
+    local help=$(
+        cat <<EOF
+Usage: $SELF install [-c <cfg>] [-ci|--coturn-ip <coturn_ip>] [-d <dir>] [-f <port_front_end>] [-pfeh <port_front_end_https>] [-i <ip>] [-ipb|--ice-port-begin <port>] [-ipe|--ice-port-end] [-n <num>] [-ospi|--owt-server-p2p-ip <owt_server_p2p_ip>] [-S <type>] [-m <user>] [-s <size>] [-g <gfx>] [-ps|--port-signaling <port_signaling>] [-psh|--port-signaling-https <port_signaling_https>] [-u] [-l] [-h] [--codec <codec>] [-https] [<img>] [-isi|--icr-start-immediately] [-qsv|--qsv-enable] [-rf|--renderfps-enc-enable] [-ifr|--icr-fr]
+  Install aic for cloud
+
+  -c <cfg>:  AIC configuration. Default: $cfg
+  -d <dir>:  Work directory. Default: $dir
+  -f <port_front_end>:  Port front end. Default: $port_front_end
+  -g <gfx>:  Graphic stack [$gfx_opts]. Default: $gfx
+  -h:  Print the usage message.
+  -i <ip>:  Host IP address. Default: $ip
+  -l:  Debug the latency.
+  -m <user>:  Number of multi users. Default: $user
+  -n <num>:  Number of instances. Default: $num
+  -r <render nodes count>:  Gpu render node number. Default: 1
+  -X <gpu nodes file>: Define the gpu node id in one line for one instance.
+  -G <cpu-core-file string>: Specify cpu core assignment file, which contains
+                             the cpu core id in one line for one instance.
+  -s <size>:  Display size in WxH formt. Default: $size
+  -u:  Update Android image. Default: $update
+  -H:  Use huge pages. Default: $huge
+  -I <input_num>:  Virutal input number. Default: $input_num
+  -L <sid_for_measure_latency>:  Test e2e latency on specific streamer. Default: $sid_for_measure_latency
+  -S <type>:  Type of aic cloud. Default: $type, 0/1, default; 2, esc(obsolete); 3 aic; 4, dg2;
+  -T:  Telemetry is enabled for aic streamer. Default: $telemetry_enable
+  -y:  Use external ICR instead of Titan: $ICR_ON
+  -yi: Use internal ICR inside andorid instance: $ICR_ON
+  -ci|--coturn-ip <coturn_ip>:  Coturn IP. Default: $coturn_ip
+  -ri|--router-ip <router_ip>:  Rounter IP, if deployed behind a router, need to set router's public IP here.
+  -rf|--renderfps-enc <0/1>:  Render fps encoding is disabled or enabled for ICR encoder. Default: $renderfps_enc
+  -data|--setup-data:  Setup data is enabled. Default: $setup_data
+  --codec <codec>:  Codec that is enabled for ICR. e.g. "--codec avc|hevc|av1". Default: $codec
+  -https:  Enable HTTPS. Default: $HTTPS_ENABLE
+  -aid|--ai-dispatcher-remote-inference <CPU/GPU> Enable AI dispatcher remote inference.
+  -ipb|--ice-port-begin <port>:  ICE port begin. Default: $ice_port_begin
+  -ipe|--ice-port-end <port>:  ICE port end. Default: $ice_port_end
+  -isi|--icr-start-immediately:  Icr start immediately. Default: $icr_start_immediately
+  -ifr|--icr-fr <30/60>:  Encoding fps of ICR encoder. Default: $icr_fr
+  -ospi|--owt-server-p2p-ip <owt_server_p2p_ip>:  OWT server P2P IP. Default: $owt_server_p2p_ip
+  -pfeh <port_front_end_https>:  Port front end heeps. Default: $port_front_end_https
+  -ps|--port-signaling <port_signaling>:  Port signaling. Default: $port_signaling
+  -psh|--port-signaling-https <port_signaling_https>:  Port signaling https. Default: $port_signaling_https
+  -qsv|--qsv-enable:  QSV is enabled for aic streamer. Default: $qsv_enable
+  -no-drc|--disable-drc:  Disable ICR dynamic resolution change. Default: 0
+  -cd|--config-display: Pass this parameter to select display stream format, fps, bitrate, ratectrl. Default is "avc, 30, 3.3, VBR"
+  <img>:  Image directory. Default: $img
+
+AIC configuration:
+  The aic configuration provided by "-c" option will be passed to aic script,
+  all the whitespaces must be escaped or replaced by ",", this option will be
+  removed once the API is stable
+
+IP address:
+  The same host IP address will be used to access signaling server, front-end
+  web server and ICE server, the primary IP address is used as default, you
+  need to select the correct one when there are multiple network interfaces
+
+Data sharing:
+  We use data provisioner to setup data volume to support data sharing between
+  instances to save storage and improve performance, as well as ease the user
+  data management, current solution is based on overlayfs, each data has "base"
+  layer and the upper layer which stores the dalta
+
+  The single instance deployment is used to prepare "base" data layer, so the
+  common usage will be:
+  * deploy single instance: $SELF install -n 1
+  * prepare the "base" data layer, e.g. install app via adb
+  * deploy multiple instances, e.g. 4: $SELF install -n 4
+EOF
+    )
+
+    if [[ ! -z `echo $* | grep -E 'cd|config-display'` ]]; then
+        local a=`echo $* | grep -E "\-s "`
+        local b=`echo $* | grep -E '\-ifr|\-\-icr-fr'`
+        local c=`echo $* | grep -E 'codec'`
+	if [[ ! -z `echo $a` ]] || [[ ! -z `echo $b` ]] || [[ ! -z `echo $c` ]]; then
+	    echo "Cannot Override Codec, Frame Rate & Resolution in Display Config Mode"
+	    echo "Don't Pass -s, -ifr, --codec along with -cd"
+	    exit 4
+	fi
+        echo ""
+        echo "================================"
+        echo "Display Config selection enabled"
+	echo "Overriding of Codec, resolution, fps, are not allowed"
+    fi
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+        -c)
+            shift
+            cfg=${1//,/ }
+            shift
+            ;;
+        -ci | --coturn-ip)
+            shift
+            coturn_ip=$1
+            COTURN_IP=$coturn_ip
+            echo "Coturn IP: $COTURN_IP"
+            shift
+            ;;
+        -ri | --router-ip)
+            shift
+            router_ip=$1
+            echo "Router IP set: $router_ip"
+            shift
+            ;;
+        -d)
+            shift
+            dir=$1
+            shift
+            ;;
+        -f)
+            shift
+            port_front_end=$1
+            if [ ! -n "$port_front_end" ]; then
+                echo "port_front_end is null"
+                exit 1
+            fi
+
+            if [ $port_front_end -lt 1 ]; then
+                echo "$port_front_end < 1"
+                exit 1
+            fi
+
+            if [ $port_front_end -gt 65535 ]; then
+                echo "$port_front_end > 65535"
+                exit 1
+            fi
+            PORT_FRONT_END=$port_front_end
+            echo "Set PORT_FRONT_END=$port_front_end"
+            shift
+            ;;
+        -pfeh)
+            shift
+            port_front_end_https=$1
+            if [ ! -n "$port_front_end_https" ]; then
+                echo "port_front_end is null"
+                exit 1
+            fi
+
+            if [ $port_front_end_https -lt 1 ]; then
+                echo "$port_front_end_https < 1"
+                exit 1
+            fi
+
+            if [ $port_front_end_https -gt 65535 ]; then
+                echo "$port_front_end_https > 65535"
+                exit 1
+            fi
+            PORT_FRONT_END_HTTPS=$port_front_end_https
+            echo "Set PORT_FRONT_END_HTTPS=$port_front_end_https"
+            shift
+            ;;
+        -i)
+            shift
+            ip=$1
+            echo "ip=$ip"
+            shift
+            ;;
+        -ipb | --ice-port-begin)
+            shift
+            ice_port_begin=$1
+            if [ $ice_port_begin -lt 1 ]; then
+                echo "$ice_port_begin < 1"
+                exit 1
+            fi
+
+            if [ $ice_port_begin -gt 65535 ]; then
+                echo "$ice_port_begin > 65535"
+                exit 1
+            fi
+            shift
+            ;;
+        -ipe | --ice-port-end)
+            shift
+            ice_port_end=$1
+            if [ $ice_port_end -lt 1 ]; then
+                echo "$ice_port_end < 1"
+                exit 1
+            fi
+
+            if [ $ice_port_end -gt 65535 ]; then
+                echo "$ice_port_end > 65535"
+                exit 1
+            fi
+            shift
+            ;;
+        -I)
+            shift
+            input_num=$1
+            shift
+            ;;
+        -g)
+            shift
+            gfx=$1
+            if echo $gfx_opts | grep -v -w $gfx >/dev/null 2>&1; then
+                echo "invalid gfx option: $gfx"
+                echo "$help" && exit 1
+            fi
+            shift
+            ;;
+        -ps | --port-signaling)
+            shift
+            port_signaling=$1
+            if [ ! -n "$port_signaling" ]; then
+                echo "port_signaling is null"
+                exit 1
+            fi
+
+            if [ "$port_signaling" -lt 1 ]; then
+                echo "$port_signaling < 1"
+                exit 1
+            fi
+
+            if [ "$port_signaling" -gt 65535 ]; then
+                echo "$port_signaling > 65535"
+                exit 1
+            fi
+            PORT_SIGNALING=$port_signaling
+            echo "Set PORT_SIGNALING=$port_signaling"
+            shift
+            ;;
+        -psh | --port-signaling-https)
+            shift
+            port_signaling_https=$1
+            if [ ! -n "$port_signaling_https" ]; then
+                echo "port_signaling is null"
+                exit 1
+            fi
+
+            if [ "$port_signaling_https" -lt 1 ]; then
+                echo "$port_signaling_https < 1"
+                exit 1
+            fi
+
+            if [ "$port_signaling_https" -gt 65535 ]; then
+                echo "$port_signaling_https > 65535"
+                exit 1
+            fi
+            PORT_SIGNALING_HTTPS=$port_signaling_https
+            echo "Set PORT_SIGNALING_HTTPS=$port_signaling_https"
+            shift
+            ;;
+        -ospi | --owt-server-p2p-ip)
+            shift
+            owt_server_p2p_ip=$1
+            OWT_SERVER_P2P_IP=$owt_server_p2p_ip
+            echo "OWT server P2P IP: $OWT_SERVER_P2P_IP"
+            shift
+            ;;
+        -r)
+            shift
+            GPU_NODES=$1
+            shift
+            ;;
+        -X)
+            shift
+            GPU_NODES_FILE=$1
+            shift
+            ;;
+        -G)
+            shift
+            CPU_CORE_FILE=$1
+            shift
+            ;;
+        -n)
+            shift
+            num=$1
+            shift
+            ;;
+        -m)
+            shift
+            user=$1
+            shift
+            ;;
+        -S)
+            shift
+            type=$1
+            shift
+            ;;
+        -s)
+            shift
+            size=$1
+            shift
+            ;;
+        -H)
+            huge="true"
+            shift
+            ;;
+        -u)
+            update="y"
+            shift
+            ;;
+        -l)
+            privileged="true"
+            shift
+            ;;
+        -L)
+            shift
+            sid_for_measure_latency=$1
+            shift
+            ;;
+        --codec)
+            shift
+            echo $1
+            if [[ "$1" =~ (avc|hevc|av1) ]]
+            then
+                codec=$1
+                echo "Codec: $codec"
+            else
+                echo "Unsupported codec: $1"
+                exit -1
+            fi
+            shift
+            ;;
+        -https)
+            HTTPS_ENABLE="true"
+            shift
+            ;;
+        -T)
+            telemetry_enable="true"
+            shift
+            ;;
+        -y)
+            ICR_ON="y"
+	    mkdir -p $WORK_DIR/icr
+            IMAGESDG2="$IMAGESDG2 encoder"
+            shift
+            ;;
+        -yi)
+            ICR_INTERNAL="true"
+            ICR_ON="y"
+            mkdir -p $WORK_DIR/icr
+            shift
+            ;;
+        -aid | --ai-dispatcher-remote-inference)
+            shift
+            AI_RI_HW="$1"
+            if [[ "$AI_RI_HW" != "CPU" ]] &&
+                [[ "$AI_RI_HW" != "GPU" ]]; then
+                echo "-aid | --ai-dispatcher option should be either CPU or GPU"
+                exit 1
+            fi
+            AI_RI_ON="true"
+            IMAGESDG2="$IMAGESDG2 ai-dispatcher"
+            shift
+            ;;
+        -isi | --icr-start-immediately)
+            icr_start_immediately="true"
+            shift
+            ;;
+        -qsv | --qsv-enable)
+            qsv_enable="true"
+            shift
+            ;;
+        -data | --setup-data)
+            setup_data="true"
+            shift
+            ;;
+        -rf | --renderfps-enc)
+            shift
+            renderfps_enc=$1
+            shift
+            ;;
+        -ifr | --icr-fr)
+            shift
+            icr_fr=$1
+            shift
+            ;;
+        -no-drc | --disable-drc)
+            disable_drc=1
+            shift
+            ;;
+        -cd | --config-display)
+            local menu=$(cat <<EOF
+--------------------------------------------------------\n
+Option | Codec  | FPS | Resolution | Avg Bit | Max Bit |\n
+--------------------------------------------------------\n
+0      | avc    | 30  | 720p       | 3.3     | 6.6     |\n
+1      | avc    | 60  | 720p       | 6.6     | 13.2    |\n
+2      | avc    | 30  | 1080p      | 8       | 16      |\n
+3      | avc    | 60  | 1080p      | 16      | 32      |\n
+4      | hevc   | 30  | 720p       | 2.3     | 4.6     |\n
+5      | hevc   | 60  | 720p       | 4.6     | 9.2     |\n
+6      | hevc   | 30  | 1080p      | 5.6     | 11.2    |\n
+7      | hevc   | 60  | 1080p      | 11.2    | 22.4    |\n
+8      | av1    | 30  | 720p       | 2.3     | 4.6     |\n
+9      | av1    | 60  | 720p       | 4.6     | 9.2     |\n
+10     | av1    | 30  | 1080p      | 5.6     | 11.2    |\n
+11     | av1    | 60  | 1080p      | 11.2    | 22.4    |\n
+--------------------------------------------------------\n
+EOF
+            )
+            echo -e $menu
+	    read -p "Select the Display Config:" dc
+	    configure_display $dc
+            shift
+            ;;
+        -h) echo "$help" && exit ;;
+        *) echo "no such option: $1" && exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
+    img=${1:-$img}
+    cfg=${cfg//,/ }
+
+    local width
+    local height
+    IFS="x" read width height <<<"$size"
+
+    dumpvars "cfg dir img ip num user gfx update size"
+
+    if [[ $user -gt $MAX_CONCURRENT_USER_NUM ]]; then
+      err "error! Max user number is $MAX_CONCURRENT_USER_NUM"
+      exit 1
+    fi
+
+    IMAGES=$IMAGESDEFAULT
+
+    case $type in
+    0) ;;
+    1) ;;
+    2) IMAGES=$IMAGESESC ;;
+    3)
+        IMAGES=$IMAGESAIC
+        stream_encoded_mode="true"
+        ;;
+    4) IMAGES=$IMAGESDG2 ;;
+    *) echo "no type available" && exit 1 ;;
+    esac
+
+    # uninstall first if necessary
+    [[ -n "$(containers -a $IMAGESALL)" ]] && uninstall
+
+    if [[ "$setup_data" == "true" ]] && [[ -f "$DATA_PROVISIONER" ]]; then
+        msg "setup data volume"
+        if ((num == 1)); then
+            msg 'use instance 0 to prepare "base" layer'
+            BASE_ID=0 PREFIX=data $DATA_PROVISIONER -n $num -u $user $dir
+        else
+            BASE_ID=none PREFIX=data $DATA_PROVISIONER -n $num -u $user $dir
+        fi
+    else
+        msg "no $DATA_PROVISIONER available, skip"
+    fi
+
+    # set concurrent multi users prop
+    if [[ $user -gt 1 ]]; then
+      sed -i "s|ro.concurrent.user.num.*|ro.concurrent.user.num=$user|g" $CONCURRENT_USER_PKG_DIR/system.prop
+    fi
+
+    #Check if aic-manager exist, else re-compile
+    if [ ! -f "aic-manager.tar.gz" ]; then
+        echo "Create aic-manager"
+        AIC_MANAGER_WORKDIR="aic-manager" ./aic-build aic-manager
+    fi
+
+    msg "install aic"
+    local args="-n $num -p $dir -r $size -I $input_num"
+    [[ "$update" == "y" ]] && args="$args -u"
+    [[ $user -gt 1 ]] && args="$args -U"
+
+    if [ ! -z "$GPU_NODES_FILE" ]; then
+        args="$args -X $GPU_NODES_FILE"
+    fi
+
+    if [ ! -z "$CPU_CORE_FILE" ]; then
+        if [ -z "$(awk ''NR==$((num))'' $CPU_CORE_FILE)" ]; then
+            echo "Error: The cpuset count in $CPU_CORE_FILE is less than android instances."
+            exit -1
+        fi
+        args="$args -G $CPU_CORE_FILE"
+    fi
+
+    if [[ "$gfx" == "hw" ]] && [[ "$stream_encoded_mode" == "true" ]]; then
+        args="$args -H -x -w -R $GPU_NODES"
+    elif [[ "$gfx" == "hw" ]] && [[ "$stream_encoded_mode" == "false" ]]; then
+        args="$args -H -R $GPU_NODES"
+    fi
+
+    if [[ "$ICR_INTERNAL" == "true" ]]; then
+        args="$args -x -R $GPU_NODES -ddrc $disable_drc"
+    fi
+
+    if [[ "$AI_RI_ON" == "true" ]]; then
+        args="$args -aid"
+    fi
+
+    if [[ "$huge" == "true" ]]; then
+        args="$args -huge"
+    fi
+
+    args="$args --codec $codec"
+
+    if [ $renderfps_enc -eq 1 ]; then
+        args="$args -rfpsicr"
+    fi
+
+    msg "$cfg $args"
+    K8S_ENV_DISPLAY_FPS=$icr_fr $AIC_INSTALLER install $cfg $args
+
+    msg "install other containers"
+    for name in $IMAGES; do
+        if [[ "$name" == "coturn" ]]; then
+            local envs="-L $COTURN_IP -E $COTURN_IP -X $COTURN_IP"
+            if [[ ! -z "$router_ip" ]]; then
+                envs="-L $COTURN_IP -E $COTURN_IP -X $router_ip"
+            fi
+            $DOCKER create --name $name --net host --user 0 coturn/coturn:4.5.2-r11 -n $envs -r realm -a -u username:password
+            continue
+        fi
+        file=${img}/${name}*.tar.gz
+        image=${name}:${TAG}
+
+        msg "load $file"
+        old=$($DOCKER load -i $file | sed -n 's/Loaded image[^:]*:\s*//p')
+        msg "tag $old as $image"
+        $DOCKER tag $old $image
+
+        msg "create container from $image"
+        case "$name" in
+        owt-server-p2p)
+            $DOCKER create --name $name -p $PORT_SIGNALING:8095 -p $PORT_SIGNALING_HTTPS:8096 $image
+            ;;
+        webrtc-front-end)
+            local envs="-e OWT_SERVER_P2P_IP=$OWT_SERVER_P2P_IP -e COTURN_IP=$COTURN_IP -e ANDROID_HOST_IP=$ip -e BACKEND_HOST_IP=$ip -e WEBSOCKET_HOST_IP=$ip"
+            if [[ ! -z "$router_ip" ]]; then
+                envs="-e OWT_SERVER_P2P_IP=$router_ip -e COTURN_IP=$router_ip -e ANDROID_HOST_IP=$router_ip -e BACKEND_HOST_IP=$router_ip -e WEBSOCKET_HOST_IP=$router_ip"
+            fi
+            $DOCKER create --name $name -p $PORT_FRONT_END:8000 -p $PORT_FRONT_END_HTTPS:8001 $envs -e PORT_SIGNALING=$PORT_SIGNALING -e PORT_SIGNALING_HTTPS=$PORT_SIGNALING_HTTPS -e HTTPS_ENABLE=$HTTPS_ENABLE $image
+            ;;
+        aic-streamer)
+            local signaling="https://$OWT_SERVER_P2P_IP:$PORT_SIGNALING_HTTPS"
+            local envs="-e K8S_ENV_DISPLAY_RESOLUTION_X=$width -e K8S_ENV_DISPLAY_RESOLUTION_Y=$height -e VIRTUAL_INPUT_NUM=$input_num -e OWT_SERVER_P2P_IP=$OWT_SERVER_P2P_IP -e COTURN_IP=$COTURN_IP -v /etc/localtime:/etc/localtime"
+            local mnts="-v $dir/ipc:/workdir/ipc"
+
+            if [[ "$gfx" == "hw" ]] && [[ "$stream_encoded_mode" == "true" ]]; then
+                envs="$envs -e K8S_ENV_USE_ENCODED_FRAME=true"
+            elif [[ "$gfx" == "hw" ]] && [[ "$stream_encoded_mode" == "false" ]]; then
+                envs="$envs -e K8S_ENV_USE_GFX=true -e K8S_ENV_OWT_DISABLE_DROP_FRAME=true"
+                mnts="$mnts --device /dev/dri:/dev/dri"
+            elif [[ "$gfx" == "host" ]] && [[ "$stream_encoded_mode" == "false" ]]; then
+                envs="$envs -e K8S_ENV_USE_HOST_GFX=true -e K8S_ENV_OWT_DISABLE_DROP_FRAME=true"
+                mnts="$mnts --device /dev/dri:/dev/dri"
+            fi
+
+            local priv=""
+            if [[ "$privileged" == "true" ]]; then
+                priv="--privileged=true -u root"
+                envs="$envs -e ENABLE_ENV_PRIVILEGED=true"
+            fi
+
+            envs="$envs -e CODEC=$codec"
+
+            if [ $ice_port_begin -ge 1 ]; then
+                envs="$envs -e ICE_PORT_BEGIN=$ice_port_begin"
+            fi
+
+            if [ $ice_port_end -ge 1 ]; then
+                envs="$envs -e ICE_PORT_END=$ice_port_end"
+            fi
+
+            if [[ "$telemetry_enable" == "true" ]]; then
+                envs="$envs -e ENABLE_ENV_TELEMETRY=true"
+            fi
+
+            local args="--net android $image"
+            for ((i = 0; i < $num; i++)); do
+                $DOCKER create --name $name$i $priv -p $(($TELEMETRY_PORT + i)):$(($TELEMETRY_PORT + i)) $envs $mnts $args -i $i $signaling
+            done
+            ;;
+        streamer)
+            for ((i = $num-1; i >= 0; i--)); do
+                local INS_ON_NODE=""
+                if [ ! -z "$GPU_NODES_FILE" ]; then
+                    if [ ! -z "$(awk ''NR==$((i + 1))'' $GPU_NODES_FILE)" ]; then
+                        INDEX=$(get_specified_gpu_node "$(awk ''NR==$((i + 1))'' $GPU_NODES_FILE)")
+                        INS_ON_NODE="$(expr $INDEX + 128)"
+                    else
+                        echo "[ERROR]Please check $GPU_NODES_FILE."
+                        exit -1
+                    fi
+                else
+                    INS_ON_NODE="$(expr $i % $GPU_NODES + 128)"
+                fi
+
+                local DEVICE="/dev/dri/renderD$INS_ON_NODE"
+                local DEVICE_GRP=$(ls -g $DEVICE | awk '{print $3}' | xargs getent group | awk -F: '{print $3}')
+                local envs="-e DEVICE=$DEVICE -e P2P=$ip -e COTURN_IP=$COTURN_IP -e K8S_ENV_DISPLAY_RESOLUTION_X=$width -e K8S_ENV_DISPLAY_RESOLUTION_Y=$height -e VIRTUAL_INPUT_NUM=$input_num"
+                if [[ "$ICR_ON" == "y" ]]; then
+                    local envs="$envs -e ICR_ON=$ICR_ON"
+                fi
+
+                envs="$envs -e CODEC=$codec"
+
+
+                if [[ "$icr_start_immediately" == "true" ]]; then
+                    envs="$envs -e ENV_ICR_START_IMMEDIATELY=true"
+                fi
+
+                if [ $ice_port_begin -ge 1 ]; then
+                    envs="$envs -e ICE_PORT_BEGIN=$ice_port_begin"
+                fi
+
+                if [ $ice_port_end -ge 1 ]; then
+                    envs="$envs -e ICE_PORT_END=$ice_port_end"
+                fi
+
+                local args="--net android --cap-add SYS_ADMIN --device $DEVICE --group-add $DEVICE_GRP $image"
+                if [ ! -z "$CPU_CORE_FILE" ]; then
+                    let index=i+1
+                    cpuset=`head -$index $CPU_CORE_FILE| tail -1`
+                    args="--cpuset-cpus=$cpuset $args"
+                fi
+                local mnts="-v $(pwd)/workdir:/opt/workdir"
+
+                # force to use CQP before BRC can work
+                #envs="$envs -e K8S_ENV_FORCE_CQP=true"
+                if [[ $user -gt 1 ]]; then
+                    envs="$envs -e K8S_ENV_USER_COUNT_PER_ANDROID=$user"
+                    for ((k = $user-1; k >= 0; k--)); do
+                        $DOCKER create --name streamer$i"-"$k $envs $mnts $args -i $i -u $k $ip
+                    done
+                else
+                    if [ $sid_for_measure_latency -eq $i ]; then
+                        local priv="--privileged=true -u root"
+                        envs="$envs -e ENABLE_ENV_PRIVILEGED=true"
+                        $DOCKER create --name streamer$i $priv $envs $mnts $args -i $i -l $ip
+                    else
+                        $DOCKER create --name streamer$i $envs $mnts $args -i $i $ip
+                    fi
+                fi
+            done
+            ;;
+        encoder)
+            for ((i = $num-1; i >= 0; i--)); do
+                local INS_ON_NODE=""
+                if [ ! -z "$GPU_NODES_FILE" ]; then
+                    if [ ! -z "$(awk ''NR==$((i + 1))'' $GPU_NODES_FILE)" ]; then
+                        INDEX=$(get_specified_gpu_node "$(awk ''NR==$((i + 1))'' $GPU_NODES_FILE)")
+                        INS_ON_NODE="$(expr $INDEX + 128)"
+                    else
+                        echo "[ERROR]Please check $GPU_NODES_FILE."
+                        exit -1
+                    fi
+                else
+                    INS_ON_NODE="$(expr $i % $GPU_NODES + 128)"
+                fi
+
+                local DEVICE="/dev/dri/renderD$INS_ON_NODE"
+                local DEVICE_GRP=$(ls -g $DEVICE | awk '{print $3}' | xargs getent group | awk -F: '{print $3}')
+
+                local envs="-e DEVICE=$DEVICE -e VAAPI_DEVICE=$DEVICE -e render_server_port=23432 -e K8S_ENV_DISPLAY_RESOLUTION_X=$width -e K8S_ENV_DISPLAY_RESOLUTION_Y=$height -e DISABLE_DYNAMIC_RESOLUTION=$disable_drc -e K8S_ENV_AVG_BITRATE=$abit -e K8S_ENV_MAX_BITRATE=$mbit"
+
+                envs="$envs -e CODEC=$codec"
+
+                if [ $renderfps_enc -eq 1 ]; then
+                    envs="$envs -e ENV_RENDERFPS_ENC_ENABLE=true"
+                fi
+
+                local args="--net android --cap-add SYS_ADMIN --device $DEVICE --group-add $DEVICE_GRP $image"
+                if [ ! -z "$CPU_CORE_FILE" ]; then
+                    let index=i+1
+                    cpuset=`head -$index $CPU_CORE_FILE| tail -1`
+                    args="--cpuset-cpus=$cpuset $args"
+                fi
+                local mnts="-v $(pwd)/workdir:/opt/workdir"
+
+                if [[ $user -gt 1 ]]; then
+                    envs="$envs -e K8S_ENV_USER_COUNT_PER_ANDROID=$user"
+                    for ((k = $user-1; k >= 0; k--)); do
+                        $DOCKER create --name encoder$i"-"$k $envs $mnts $args -i $i -u $k $ip
+                    done
+                else
+                    if [ $sid_for_measure_latency -eq $i ]; then
+                        $DOCKER create --name encoder$i $envs $mnts $args -i $i -g $gop_for_measure_latency $ip
+                    else
+                        $DOCKER create --name encoder$i $envs $mnts $args -i $i -f $icr_fr $ip
+                    fi
+                fi
+            done
+	    ;;
+        texture-service)
+            local mnts="-v $(pwd)/workdir/ipc:/opt/ts/ipc"
+            $DOCKER create --name $name $mnts $image
+            ;;
+        ai-dispatcher)
+            local mnts="-v $(pwd)/workdir/ipc:/home/.ipc"
+            local args="--network=host --privileged "
+            local env="-e http_proxy=$http_proxy -e https_proxy=$https_proxy"
+            for ((i = $num-1; i >= 0; i--)); do
+                #Binding GPU instance to ai-dispatcher
+                local INS_ON_NODE=""
+                local deviceId=""
+                if [[ "$AI_RI_HW" == "CPU" ]]; then
+                    deviceId="$AI_RI_HW"
+                elif [ ! -z "$GPU_NODES_FILE" ]; then
+                    if [ ! -z "$(awk ''NR==$((i + 1))'' $GPU_NODES_FILE)" ]; then
+                        INDEX=$(get_specified_gpu_node "$(awk ''NR==$((i + 1))'' $GPU_NODES_FILE)")
+                        deviceId="$AI_RI_HW.$INDEX"
+                    else
+                        echo "[ERROR]Please check $GPU_NODES_FILE."
+                        exit -1
+                    fi
+                else
+                    if [[ $GPU_NODES == 0 ]]; then
+                        INS_ON_NODE="0"
+                        echo "There are no GPU cards available. Hence falling back to CPU"
+                        deviceId="CPU"
+                    else
+                        INS_ON_NODE=$(($i % $GPU_NODES))
+                        deviceId="$AI_RI_HW.$INS_ON_NODE"
+                    fi
+                fi
+                if [ ! -z "$CPU_CORE_FILE" ]; then
+                    let index=i+1
+                    cpuset=`head -$index $CPU_CORE_FILE| tail -1`
+                    args="--cpuset-cpus=$cpuset $args"
+                fi
+                local node_env="-e INS_INDEX=$i -e INFERENCE_HW="$deviceId""
+                $DOCKER create --name ai-dispatcher$i $args $mnts $env $node_env $image
+            done
+            ;;
+        *) echo "invalid image $i" && exit 1 ;;
+        esac
+    done
+}
+
+function uninstall() {
+    local dir="$WORK_DIR"
+
+    local help=$(
+        cat <<EOF
+Usage: $SELF uninstall [-h]
+  Uninstall aic for cloud
+
+  -d <dir>:  work directory, default: $dir
+  -h:        print the usage message
+EOF
+    )
+
+    while getopts ":d:h" opt; do
+        case $opt in
+        d) dir=$OPTARG ;;
+        h) echo "$help" && exit ;;
+        *) echo "no such option: $opt" && exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
+    dumpvars "dir"
+
+    # stop first if it is running
+    [[ -n "$(containers $IMAGESALL)" ]] && stop
+
+    msg "uninstall other containers"
+    for n in $(containers -a $IMAGESALL); do
+        msg "remove container: $n"
+        $DOCKER rm -f $n
+    done
+
+    msg "uninstall images"
+    for n in $(images $IMAGESALL); do
+        if [[ "$name" == "coturn" ]]; then
+            continue
+        fi
+        msg "remove image: $n"
+        $DOCKER rmi -f $n
+    done
+
+    msg "uninstall aic"
+    $AIC_INSTALLER uninstall
+
+    if [[ -f "$DATA_PROVISIONER" ]]; then
+        msg "detach data volume"
+        PREFIX=data $DATA_PROVISIONER -D $dir
+    fi
+}
+
+function start() {
+    local help=$(
+        cat <<EOF
+Usage: $SELF start [-nsc|--not-start-coturn] [-nso|--not-start-owt-server-p2p] [-h]
+  Start aic for cloud
+  -nsc|--not-start-coturn: Not start coturn. Default: $START_COTURN
+  -nso|--not-start-owt-server-p2p: Not start OWT server P2P. Default: $START_OWT_SERVER_P2P
+  -h:        print the usage message
+EOF
+    )
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+        -nsc | --not-start-coturn)
+            START_COTURN="false"
+            echo "START_COTURN=$START_COTURN"
+            shift
+            ;;
+        -nso | --not-start-owt-server-p2p)
+            START_OWT_SERVER_P2P="false"
+            echo "START_OWT_SERVER_P2P=$START_OWT_SERVER_P2P"
+            shift
+            ;;
+        -h) echo "$help" && exit ;;
+        *) echo "no such option: $1" && exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
+    msg "start aic"
+    $AIC_INSTALLER start
+
+    local inst=0
+    local instId=0;
+    local user_num=0
+    local icr_internal=0
+    if [[ -f "$ICR_INTERNAL_LOCAL_PROP_FILE_PATH" ]]; then
+        icr_internal=`grep -rw "ro.boot.icr.internal" $ICR_INTERNAL_LOCAL_PROP_FILE_PATH | head -n1| sed "s|ro.boot.icr.internal=||g"`
+    fi
+
+    if [[ -f "$CONCURRENT_USER_PKG_DIR/system.prop" ]]; then
+        user_num=`grep -rw "ro.concurrent.user.num" $CONCURRENT_USER_PKG_DIR/system.prop | sed "s|ro.concurrent.user.num=||g"`
+        msg "multi user number is $user_num"
+    fi
+
+    for n in $(containers -a $IMAGES); do
+        if [ "$n" == "coturn" ] && [ "$START_COTURN" == "false" ]; then
+            msg "Do not start $n as COTURN_IP($COTURN_IP) is given. START_COTURN=$START_COTURN"
+            continue
+        fi
+
+        if [ "$n" == "owt-server-p2p" ] && [ "$START_OWT_SERVER_P2P" == "false" ]; then
+            msg "Do not start $n as OWT_SERVER_P2P_IP($OWT_SERVER_P2P_IP) is given. START_OWT_SERVER_P2P=$START_OWT_SERVER_P2P"
+            continue
+        fi
+
+        # Delay some time before start next concurrent multi user streamer
+        if [[ $n =~ "streamer" ]] && is_concurrent_streamer $n; then
+          sleep 2
+        fi
+
+        # Store ICR ip-addr to workdir/icr
+        [[ "$n" == encoder* ]] && inst=$((inst+1))
+        if [[ "$n" == "streamer0" || "$n" == "streamer0-0" ]] && [[ ! -z `echo $IMAGES | grep encoder` ]]; then
+          sleep 1
+          if [[ $user_num -gt 1 ]]; then
+            inst=$(($inst/$user_num))
+            for (( i=0; i<$inst ; i++ )); do
+              for ((k = $user_num-1; k >= 0; k--)); do
+                ip_addr=`docker inspect -f '{{.NetworkSettings.Networks.android.IPAddress}}' "encoder$i-$k"`
+                echo "$ip_addr" > $WORK_DIR/icr/icr$i-$k
+              done
+            done
+          else
+            for (( i=0; i<$inst ; i++ ))
+            do
+              ip_addr=`docker inspect -f '{{.NetworkSettings.Networks.android.IPAddress}}' "encoder$i"`
+              echo "$ip_addr" > $WORK_DIR/icr/icr$i
+            done
+          fi
+        fi
+
+        #Below logic is to add ipaddress if icr installed inside android instance '-yi'
+        if [[ $icr_internal == 1 && "$n" == streamer* ]]; then
+          ip_addr=`docker inspect -f '{{.NetworkSettings.Networks.android.IPAddress}}' "android$instId"`
+          echo "$ip_addr" > $WORK_DIR/icr/icr$instId
+          instId=$((instId+1))
+        fi
+
+        msg "start container: $n"
+        $DOCKER start $n
+
+    done
+}
+
+function stop() {
+    local help=$(
+        cat <<EOF
+Usage: $SELF stop [-h]
+  Stop aic for cloud
+
+  -h:        print the usage message
+EOF
+    )
+
+    while getopts ":h" opt; do
+        case $opt in
+        h) echo "$help" && exit ;;
+        *) echo "no such option: $opt" && exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
+    # remove workdir/icr contents
+    rm -rf $WORK_DIR/icr/*
+
+    for n in $(containers $IMAGES); do
+        msg "stop container: $n"
+        $DOCKER stop $n -t 0
+    done
+
+    msg "stop aic"
+    $AIC_INSTALLER stop
+}
+
+function info() {
+    local help=$(
+        cat <<EOF
+Usage: $SELF info [-h]
+  Show useful information
+
+  -h:        print the usage message
+EOF
+    )
+
+    while getopts ":h" opt; do
+        case $opt in
+        h) echo "$help" && exit ;;
+        *) echo "no such option: $opt" && exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
+    msg "Status:"
+    if [[ -n "$(containers $IMAGES)" ]]; then
+        echo "running"
+    elif [[ -n "$(containers -a $IMAGES)" ]]; then
+        echo "installed"
+    else
+        echo "uninstalled"
+    fi
+
+    msg "Images:"
+    for i in $(images $IMAGES); do
+        echo $i
+    done
+
+    msg "Containers:"
+    for i in $(containers -a $IMAGES); do
+        echo $i
+    done
+}
+
+# get container names by image tag and name prefix
+function containers() {
+    local opt=
+    # all the containers or not
+    if [[ $1 == "-a" ]]; then
+        opt=$1
+        shift
+    fi
+
+    for n in $@; do
+        if [[ "$n" == "coturn" ]]; then
+            $DOCKER ps $opt -f ancestor=coturn/coturn:4.5.2-r11 -f name=$n --format '{{.Names}}'
+	else
+            $DOCKER ps $opt -f ancestor=$n:$TAG -f name=$n --format '{{.Names}}'
+        fi
+    done
+}
+
+# get image names by image tag
+function images() {
+    for n in $@; do
+        [[ -n "$($DOCKER images -q $n:$TAG)" ]] && echo $n:$TAG
+    done
+}
+
+function is_concurrent_streamer() {
+    local name=$1
+    local index=${name##*-}
+    if [[ $name =~ "streamer" ]] && [ -n "$(echo $index | sed -n "/^[0-9]\+$/p")" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# dump variables
+function dumpvars() {
+    for v in $@; do
+        eval echo "$v: \${$v}"
+    done
+}
+
+function get_specified_gpu_node() {
+    local gpu_output=""
+    gpu_node_str=$(echo $1 | sed 's/ \|\n//g')
+    OLD_IFS="$IFS"
+    IFS=","
+    local array=($gpu_node_str)
+    IFS="$OLD_IFS"
+
+    for i in "${!array[@]}"; do
+        render_node_output="${array[i]}"
+    done
+    echo $(echo $render_node_output | sed -e 's/^,//' -e 's/,$//')
+}
+
+main "$@"

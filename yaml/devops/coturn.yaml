@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: coturn
+  namespace: "$NAMESPACE"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coturn
+  template:
+    metadata:
+      labels:
+        app: coturn
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+      hostNetwork: true
+      containers:
+      - name: coturn
+        image: coturn/coturn:4.5.2-r11
+        args:
+        - "-n"
+        - "-L $(LISTEN_IP)"
+        - "-E $(LISTEN_IP)"
+        - "-X $(EXTERNAL_IP)"
+        - "-r realm"
+        - "-a"
+        - "-u username:password"
+        env:
+        - name: LISTEN_IP
+          value: "$COTURN_IP"
+        - name: EXTERNAL_IP
+          value: "$COTURN_IP"
+        securityContext:
+          runAsUser: 0

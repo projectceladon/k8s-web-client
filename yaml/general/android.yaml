@@ -1,0 +1,411 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: android
+spec:
+  serviceName: android
+  podManagementPolicy: "Parallel"
+  replicas: $INSTANCES
+  selector:
+    matchLabels:
+      app: android
+  template:
+    metadata:
+      labels:
+        app: android
+    spec:
+      initContainers:
+      - name: init-android
+        image: busybox:1.28
+        command:
+        - sh
+        - "-c"
+        - |
+          while [ ! -f /aic_manager_status/.ready ]
+          do
+            echo "wait for aic-manager"
+            sleep 1
+          done
+
+          # configure cpuset for andorid container
+          mkdir /conn/cpuset/
+          id=${HOSTNAME##*-}
+          cpus=$(nproc)
+          interval=${K8S_ENV_ANDROID_CPUSET_NUM:-2}
+          index=$(($id%$(($cpus/$interval))))
+          start=$(($interval*$index))
+          end=$(($interval*$index+$interval-1))
+          if [ "$start" = "$end" ]; then
+            cpuset=$start
+          else
+            cpuset=$start-$end
+          fi
+          echo "$cpuset" > /conn/cpuset/cpus
+          if [ $ENV_USE_HUGE_PAGE ] && [ "$ENV_USE_HUGE_PAGE" = "true" ]; then
+            echo 9223372036852678656 > /hugetlb/kubepods/burstable/pod${MY_POD_UID}/hugetlb.2MB.limit_in_bytes
+          fi
+          chown 1000 /conn/cpuset
+          chown 1000 /conn/cpuset/cpus
+          echo '{"renderNode":"0""}' > /conn/resourceAllocated
+          touch /data/.enable_overlay
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MY_POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: ENV_USE_HUGE_PAGE
+          value: "$USE_HUGE_PAGE"
+        volumeMounts:
+        - name: aic-manager-status
+          mountPath: /aic_manager_status
+        - name: conn
+          mountPath: /conn
+        - name: data
+          mountPath: /data
+          subPathExpr: $(MY_POD_NAME)
+        - name: sys-fs-cgroup-hugetlb
+          mountPath: /hugetlb
+      containers:
+      - name: data-prepare
+        image: busybox:1.28
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 20; umount -l /data"]
+        command:
+        - sh
+        - "-c"
+        - |
+          for d in "/private-data/$MY_POD_NAME/diff" "/private-data/$MY_POD_NAME/work"; do
+            mkdir -p $d
+          done
+          mount -t overlay -o "lowerdir=/share-data,upperdir=/private-data/$MY_POD_NAME/diff,workdir=/private-data/$MY_POD_NAME/work" overlay /data
+          INDEX="$(expr ${MY_POD_NAME##*-} % $GPU_NODES)"
+          echo -e "ro.acg.rnode=$INDEX\nro.acg.vnode=$INDEX\nvirtual.input.num=2" > /data/local.prop
+
+          if [[ "$CODEC" == "avc" ]]; then
+            echo -e "sys.icr.media_url=irrv:264" > /data/local.prop
+          fi
+
+          if [[ "$CODEC" == "hevc" ]]; then
+            echo -e "sys.icr.media_url=irrv:265" > /data/local.prop
+          fi
+
+          if [[ "$CODEC" == "av1" ]]; then
+            echo -e "sys.icr.media_url=irrv:av1" > /data/local.prop
+          fi
+
+          N_OFFSET="$(expr ${MY_POD_NAME##*-} / $GPU_NODES)"
+          REMAINDER="$(expr $INSTANCES % $GPU_NODES)"
+          if [ $INDEX -lt $REMAINDER ]; then
+              INS_ON_NODE="$(expr $INSTANCES / $GPU_NODES + 1)"
+          else
+              INS_ON_NODE="$(expr $INSTANCES / $GPU_NODES)"
+          fi
+          OFFSET="$(expr 1000000000 / $WORKLOAD_FPS / $INS_ON_NODE)"
+          INCREMENT_NS="$(expr $N_OFFSET \* $OFFSET)"
+          echo -e "debug.sf.late_sf_offset_inc_ns=$INCREMENT_NS\ndebug.sf.late_app_offset_inc_ns=$INCREMENT_NS" >> /data/local.prop
+
+          while true
+          do
+            tail -f /dev/null
+          done
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: GPU_NODES
+          value: "$GPU_NODES"
+        - name: CODEC
+          value: "$CODEC"
+        volumeMounts:
+        - name: share-data
+          mountPath: /share-data
+        - name: private-data
+          mountPath: /private-data
+        - name: data
+          mountPath: /data
+          subPathExpr: $(MY_POD_NAME)
+          mountPropagation: Bidirectional
+        securityContext:
+           privileged: true
+        resources:
+          requests:
+            memory: "2Mi"
+          limits:
+            memory: "16Gi"
+      - name: android
+        image: android:local
+        startupProbe:
+          exec:
+            command:
+            - sh
+            - "-c"
+            - "[ $(getprop sys.boot_completed) ] && [ $(getprop sys.boot_completed) -eq 1 ]"
+          failureThreshold: 20
+          periodSeconds: 10
+        args: ["-e", "-w"]
+        env:
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        # TODO: enable root user for R boot up
+        #- name: NO_ROOT_USER
+        #  value: "true"
+        - name: K8S_ENV
+          value: "true"
+        - name: K8S_ENV_DISPLAY_RESOLUTION_X
+          value: "1280"
+        - name: K8S_ENV_DISPLAY_RESOLUTION_Y
+          value: "720"
+        - name: ENABLE_DATA_OVERLAY
+          value: "true"
+        - name: K8S_ENV_USE_GFX
+          value: "$USE_HW_GFX"
+        - name: ENV_USE_HUGE_PAGE
+          value: "$USE_HUGE_PAGE"
+        - name: ENABLE_CPU_ALLOCATE
+          value: "$ENABLE_CPU_ALLOCATE"
+        - name: ENV_USE_THP_LIBC
+          value: "$USE_THP_LIBC"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+          subPathExpr: $(MY_POD_NAME)
+          mountPropagation: HostToContainer
+        - name: app
+          mountPath: /oem/app
+          readOnly: true
+        - name: aic-manager-lxcfs-proc
+          mountPath: /proc/cpuinfo
+          subPath: cpuinfo
+          mountPropagation: HostToContainer
+        - name: aic-manager-lxcfs-proc
+          mountPath: /proc/meminfo
+          subPath: meminfo
+          mountPropagation: HostToContainer
+        - name: aic-manager-lxcfs-proc
+          mountPath: /proc/uptime
+          subPath: uptime
+          mountPropagation: HostToContainer
+        - name: aic-manager-lxcfs-cpu
+          mountPath: /sys/devices/system/cpu/
+          mountPropagation: HostToContainer
+        - name: aic-manager-lxcfs-cpu
+          mountPath: /sys/devices/system/cpu/present
+          subPath: online
+          mountPropagation: HostToContainer
+        - name: aic-manager-lxcfs-cpu
+          mountPath: /sys/devices/system/cpu/possible
+          subPath: online
+          mountPropagation: HostToContainer
+        - name: aic-manager-hugetlbfs
+          mountPath: /hugetlbfs
+          mountPropagation: HostToContainer
+        - name: conn
+          mountPath: /conn
+        - name: ipc
+          mountPath: /ipc
+          subPathExpr: $(MY_POD_NAME)
+        - name: binderfs
+          mountPath: /binderfs
+        - name: resource-allocate
+          mountPath: /res-alloc
+          #mountPropagation: Bidirectional
+        securityContext:
+           privileged: true
+        # TODO: enable root user for R boot up
+        #   runAsUser: 1000
+        resources:
+          requests:
+            memory: "300Mi"
+          limits:
+            memory: "16Gi"
+      - name: streamer
+        image: streamer:latest
+        startupProbe:
+          exec:
+            command:
+            - bash
+            - "-c"
+            - "cat /conn/.p2p_status && [ $(cat /conn/.p2p_status) = 'started' ]"
+          failureThreshold: 20
+          periodSeconds: 10
+        args: ["https://owt:8096"]
+        env:
+        - name: K8S_ENV
+          value: "true"
+        - name: K8S_ENV_DISPLAY_RESOLUTION_X
+          value: "1280"
+        - name: K8S_ENV_DISPLAY_RESOLUTION_Y
+          value: "720"
+        - name: K8S_ENV_USE_ENCODED_FRAME
+          value: "$USE_ENCODED_FRAME"
+        - name: K8S_ENV_OWT_DISABLE_DROP_FRAME
+          value: "true"
+        - name: K8S_ENV_USE_GFX
+          value: "$USE_HW_GFX"
+        - name: VIRTUAL_INPUT_NUM
+          value: "2"
+        - name: CODEC
+          value: "$CODEC"
+        - name: ICE_PORT_BEGIN
+          value: "$ICE_PORT_BEGIN"
+        - name: ICE_PORT_END
+          value: "$ICE_PORT_END"
+        - name: COTURN_IP
+          value: "$COTURN_IP"
+        - name: TRANSFER_DIR
+          value: "$TRANSFER_DIR"
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: ENABLE_ENV_TELEMETRY
+          value: "$TELEMETRY_ENABLE"
+        volumeMounts:
+        - name: conn
+          mountPath: /conn
+        - name: binderfs
+          mountPath: /binderfs
+          mountPropagation: HostToContainer
+        - name: transfer-dir
+          mountPath: $TRANSFER_DIR
+          mountPropagation: HostToContainer
+        - name: host-time
+          mountPath: /etc/localtime
+          readOnly: true
+        securityContext:
+           privileged: true
+           runAsUser: 0
+        resources:
+          requests:
+            memory: "20Mi"
+          limits:
+            memory: "16Gi"
+      - name: icr
+        image: icr:latest
+        args: ["-i","0","127.0.0.1"]
+        env:
+        - name: K8S_ENV
+          value: "true"
+        - name: render_server_port
+          value: "23432"
+        volumeMounts:
+        - name: conn
+          mountPath: /conn
+        securityContext:
+           privileged: true
+           runAsUser: 0
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+         claimName: data
+      - name: share-data
+        persistentVolumeClaim:
+          claimName: share-data
+      - name: private-data
+        persistentVolumeClaim:
+          claimName: private-data
+      - name: app
+        hostPath:
+          path: $APP_DIR
+          type: Directory
+      - name: transfer-dir
+        hostPath:
+          path: $TRANSFER_FILE_DIR
+          type: Directory
+      - name: aic-manager-status
+        hostPath:
+          path: /run/k8s/aic_manager_status
+          type: DirectoryOrCreate
+      - name: aic-manager-lxcfs-proc
+        hostPath:
+          path: /run/k8s/aic_manager_lxcfs/proc
+          type: DirectoryOrCreate
+      - name: aic-manager-lxcfs-cpu
+        hostPath:
+          path: /run/k8s/aic_manager_lxcfs/sys/devices/system/cpu
+          type: DirectoryOrCreate
+      - name: aic-manager-hugetlbfs
+        hostPath:
+          path: /run/k8s/hugetlbfs
+          type: DirectoryOrCreate
+      - name: sys-fs-cgroup-hugetlb
+        hostPath:
+          path: /sys/fs/cgroup/hugetlb
+          type: DirectoryOrCreate
+      - name: ipc
+        emptyDir:
+          medium: Memory
+      - name: conn
+        emptyDir:
+          medium: Memory
+      - name: binderfs
+        emptyDir:
+          medium: Memory
+      - name: resource-allocate
+        hostPath:
+          path: /run/k8s/res-alloc
+          type: DirectoryOrCreate
+      - name: host-time
+        hostPath:
+          path: /etc/localtime
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: private-data
+spec:
+  volumeName: private-data
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 8Gi
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: private-data
+spec:
+  capacity:
+    storage: 8Gi
+  accessModes:
+  - ReadWriteOnce
+  hostPath:
+    path: /opt/local-path-provisioner/private-data
+    type: DirectoryOrCreate
+  claimRef:
+    name: private-data
+    namespace: default
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: data
+spec:
+  capacity:
+    storage: 100Mi
+  accessModes:
+  - ReadWriteOnce
+  hostPath:
+    path: /run/k8s/aic_data_mnt
+    type: DirectoryOrCreate

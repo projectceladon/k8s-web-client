@@ -1,0 +1,646 @@
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+# ****************************************************************************
+# ***            Sample code, how to get video data from AIC               ***
+# ****************************************************************************
+
+# First connect hwc-sock file
+char* kHwcSockId = "/conn/hwc-sock";
+mSockClientFd = socket(AF_UNIX, SOCK_STREAM, 0);
+struct sockaddr_un addr;
+memset(&addr, 0, sizeof(addr));
+addr.sun_family = AF_UNIX;
+strncpy(&addr.sun_path[0], kHwcSockId, strlen(kHwcSockId));
+connect(mSockClientFd, (struct sockaddr*)&addr, sizeof(sa_family_t) + strlen(kHwcSockId) + 1);
+...
+
+# After connecting the hwc-sock file, start a thread to read data
+ClientThread() {
+    while (!mStop) {
+        display_event_t ev;
+        len = read(mSockClientFd, &ev, sizeof(ev));
+        if (len <= 0) {
+            break;
+        } else {
+            switch (ev.type) {
+                case DD_EVENT_DISPINFO_REQ:
+                    updateDispConfig(mSockClientFd);
+                    break;
+                case DD_EVENT_CREATE_BUFFER:
+                    createBuffer(mSockClientFd, ev.size);
+                    break;
+                case DD_EVENT_DISPLAY_REQ:
+                    displayRequest(mSockClientFd);
+					break;
+                default:
+				    break;
+			}
+        }
+    }
+}
+
+# Set display configuration to AIC
+updateDispConfig(int fd) {
+    display_info_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.event.type = DD_EVENT_DISPINFO_ACK;
+    ev.event.size = sizeof(ev);
+    ev.info.flags = 1;
+    ev.info.width = 1024;
+    ev.info.height = 600;
+    ev.info.stride = 1024;
+    ev.info.xdpi = 240;
+    ev.info.ydpi = 240;
+    ev.info.fps = 30;
+    send(fd, &ev, sizeof(ev), 0);
+}
+
+# AIC shares the display buffer to client
+createBuffer(int fd, int size) {
+    buffer_info_event_t ev;
+    auto handle = (private_handle_t)malloc(size - sizeof(ev));
+    len = recv(fd, &ev.info, sizeof(ev.info), 0);
+    len = recv(fd, handle, size - sizeof(ev), 0);
+    recvFds(fd, &(handle->fds), handle->base.numFds);
+}
+
+# Client read the shared fd
+recvFds(int fd, int* pfd, size_t fdlen) {
+    struct msghdr msg;
+    int rdata[4] = {0};
+    struct iovec vec;
+    char cmsgbuf[CMSG_SPACE(fdlen * sizeof(int))];
+    struct cmsghdr* p_cmsg;
+    int* p_fds;
+
+    vec.iov_base = rdata;
+    vec.iov_len = 16;
+    msg.msg_name = NULL;
+    msg.msg_namelen = 0;
+    msg.msg_iov = &vec;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsgbuf;
+    msg.msg_controllen = sizeof(cmsgbuf);
+    msg.msg_flags = 0;
+
+    p_fds = (int*)CMSG_DATA(CMSG_FIRSTHDR(&msg));
+    *p_fds = -1;
+    count = recvmsg(fd, &msg, MSG_WAITALL);
+    if (count <= 0) {
+        ret = -1;
+    } else {
+        p_cmsg = CMSG_FIRSTHDR(&msg);
+        if (p_cmsg == NULL) {
+            ret = -1;
+        } else {
+            p_fds = (int*)CMSG_DATA(p_cmsg);
+            for (i = 0; i < (int)fdlen; i++) {
+                pfd[i] = p_fds[i];
+            }
+        }
+    }
+}
+
+# Aic sends the ready buffer to client
+displayRequest(int fd) {
+    buffer_info_event_t ev;
+    int len = recv(fd, &ev.info, sizeof(ev.info), 0);
+    ev.event.type = DD_EVENT_DISPLAY_ACK;
+    ev.event.size = sizeof(ev);
+    send(fd, &ev, sizeof(ev), 0);
+}
+
+# Client maps the shared buffer
+mapBuffer(uint8_t** data, uint32_t* stride){
+    private_handle_t hnd = mHandles[mFrontBufferHandle];
+    size_t size = hnd->size;
+    void* mappedAddress = mmap(0, size, PROT_READ|PROT_WRITE, MAP_SHARED, hnd->fds, 0);
+    hnd->addr = uintptr_t(mappedAddress) + hnd->offset;
+    *data = (uint8_t*)hnd->addr;
+    *stride = mWidth * 4;
+}
+
+
+# ****************************************************************************
+# ***            Sample code, how to get audio data from AIC               ***
+# ****************************************************************************
+
+# AIC Audio OUT commands
+enum {
+    CMD_OPEN = 0,
+    CMD_CLOSE = 1,
+    CMD_DATA = 2
+};
+
+# AIC Audio OUT configuration
+struct audio_socket_configuration_info {
+    uint32_t sample_rate;
+    uint32_t channel_count;
+    uint32_t format;
+    uint32_t frame_count;
+};
+
+struct audio_socket_info {
+    uint32_t cmd;
+    union {
+        struct audio_socket_configuration_info asci;
+        uint32_t data_size;
+    };
+};
+
+# Header files
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+# Connect output server
+static const char* kAudioSockOut = "127.0.0.1";
+static const int PortOut = 8768;
+
+struct sockaddr_in addr;
+memset(&addr, 0, sizeof(struct sockaddr_in));
+addr.sin_family = AF_INET;
+addr.sin_port = htons(PortOut);
+inet_pton(AF_INET, kAudioSockOut, &addr.sin_addr);
+int res = connect(mSockAudio, (struct sockaddr*)&addr, sizeof(struct sockaddr_in));
+
+# Get audio data
+struct audio_socket_info asi;
+memset(&asi, 0, sizeof(struct audio_socket_info));
+uint8_t* ptr = reinterpret_cast<uint8_t*>(&asi);
+...
+ret = read(mSockAudio, ptr, sizeof(struct audio_socket_info));
+...
+
+if (asi.cmd == CMD_OPEN) {
+    mChannelCount = asi.asci.channel_count;
+    mFormat = asi.asci.format;
+    mFrameCount = asi.asci.frame_count;
+    mSampleRate = asi.asci.sample_rate;
+    ...
+} else if (asi.cmd == CMD_CLOSE) {
+    Disconnect();
+} else if (asi.cmd == CMD_DATA) {
+    if (asi.data_size > 0) {
+        ...
+        ret = read(mSockAudio, buffer, asi.data_size);//read audio data
+        ...
+    }
+}
+
+# ****************************************************************************
+# ***  Sample code, how to write audio data to AIC (remote audio record)   ***
+# ****************************************************************************
+
+# AIC Audio-IN commands
+enum {
+    CMD_OPEN = 0, # AIC is ready to receive audio data
+    CMD_CLOSE = 1 # AIC wants us to stop sending audio data
+};
+
+struct audio_socket_configuration_info {
+    uint32_t sample_rate;
+    uint32_t channel_count;
+    uint32_t format;
+    uint32_t frame_count;
+};
+
+struct audio_socket_info {
+    uint32_t cmd;
+    union {
+        struct audio_socket_configuration_info asci;
+        uint32_t data_size;
+    };
+};
+
+# Header files
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+# Connect input server
+static const char* kAudioSockIn = "127.0.0.1";
+static const int kPortIn = 8767;
+
+struct sockaddr_in addr;
+memset(&addr, 0, sizeof(struct sockaddr_in));
+addr.sin_family = AF_INET;
+addr.sin_port = htons(kPortIn);
+inet_pton(AF_INET, kAudioSockIn, &addr.sin_addr);
+int res = connect(mSockAudio, (struct sockaddr*)&addr, sizeof(struct sockaddr_in));
+
+# Handle AIC input server commands
+switch (cmd) {
+case CMD_OPEN:
+    # AIC is ready to receive audio data.
+    mChannelCount = asi.asci.channel_count;
+    mFormat = asi.asci.format;
+    mFrameCount = asi.asci.frame_count;
+    mSampleRate = asi.asci.sample_rate;
+
+    # Now, notify remote client to start audio streaming with configuration.
+    remote_client_notify_start_audio();
+
+    # register for callback i.e. on_receive_audio_callback()
+    # to receive audio data from client.
+    remote_client_subscribe_audio(on_receive_audio_callback);
+    break;
+case CMD_CLOSE:
+    # This indicates AIC doesn’t want to receive audio data anymore.
+    # Notify remote client to stop audio streaming and,
+    remote_client_notify_stop_audio();
+
+    # de-register audio callback.
+    remote_client_unsubscribe_audio();
+    Disconnect();
+    break;
+default:
+    # Unknown command
+    break;
+}
+
+# Audio data received from remote client; now send to AIC
+void on_receive_audio_callback(const void *audio_data,
+                               int bits_per_sample,
+                               int sample_rate,
+                               size_t number_of_channels,
+                               size_t number_of_frames)
+{
+    # compute buffer size
+    sizeInBytes = number_of_frames * number_of_channels * bits_per_sample;
+
+    # send
+    ssize_t sent = write(mSockAudio, audio_data, sizeInBytes);
+}
+
+# ****************************************************************************
+# ***   Command to configure AIC Audio input buffer size                   ***
+# ****************************************************************************
+Audio input buffer size is set to 10ms by default. However, it can be changed
+using below command.
+
+$ adb shell setprop virtual.audio.in.buffer_size_ms 20
+
+Above command takes effect in the next audio recording. AIC Audio record client
+must notify peer to initiate recording with the updated input buffer size to
+be in sync with AIC.
+
+
+# ****************************************************************************
+# ***            Sample code, how to give input event to AIC               ***
+# ****************************************************************************
+
+/*
+    usage:
+    d <contact> <x> <y> <pressure>
+    For example: d 0 10 10 50, pressure value 50 is pressed at a point (10, 10) with a contact.
+    m <contact> <x> <y> <pressure>
+    For example: m 0 10 10 50, the pressure value 50 slides at (10, 10).
+    u <contact>
+    Example: u 0, gesture raised
+*/
+
+# Open input device /conn/input-pipe
+    mFd = open(path, O_RDWR | O_NONBLOCK, 0);
+    if (mFd < 0) {
+        fprintf(stderr, "Failed to open pipe for read:%s\n", strerror(errno));
+        return false;
+    }
+
+# The major data structure in /usr/include/linux/input.h. Fill the structure as the code clip.
+struct input_event {
+    struct timeval time;
+    __u16 type;
+    __u16 code;
+    __s32 value;
+};
+
+clock_gettime(CLOCK_MONOTONIC, &ts);
+ev.time.tv_sec = ts.tv_sec;
+ev.time.tv_usec = ts.tv_nsec / 1000;
+ev.type = type;
+ev.code = code;
+ev.value = value;
+
+# Write the data to input device.
+if (write(mFd, &ev, sizeof(struct input_event)) < 0) {
+    perror("Failed to send event\n");
+    return false;
+}
+
+# For "d", it is touch down. Events sequence:
+cmd: d 0 287 645 50
+type: 3 code: 47 value: 0
+type: 3 code: 57 value: 0
+type: 1 code: 330 value: 1
+type: 3 code: 48 value: 4
+type: 3 code: 50 value: 6
+type: 3 code: 58 value: 50
+type: 3 code: 53 value: 287
+type: 3 code: 54 value: 645
+
+# For "m", It is move. Events sequence:
+cmd: m 0 289 631 50
+type: 3 code: 47 value: 0
+type: 3 code: 48 value: 4
+type: 3 code: 50 value: 6
+type: 3 code: 58 value: 50
+type: 3 code: 53 value: 289
+type: 3 code: 54 value: 631
+
+# For "u", It is up. Events sequence:
+cmd: u 0
+type: 3 code: 47 value: 0
+type: 3 code: 57 value: -1
+type: 1 code: 330 value: 0
+
+# For "c", it is commit. Each "d", "m", "u" should follow one "c".
+cmd: c
+type: 0 code: 0 value: 0
+
+
+# ****************************************************************************
+# ***          Sample code, how to connect ActivityMonitorService          ***
+# ****************************************************************************
+static const char* kSockWithId = "127.0.0.1";
+static const int Port = 8770;
+
+# Connec ActivityMonitorService
+mSockApp = socket(AF_INET, SOCK_STREAM, 0);
+struct sockaddr_in addr;
+memset(&addr, 0, sizeof(struct sockaddr_in));
+addr.sin_family = AF_INET;
+addr.sin_port = htons(Port);
+inet_pton(AF_INET, kSockWithId, &addr.sin_addr);
+int res = connect(mSockApp, (struct sockaddr*)&addr, sizeof(struct sockaddr_in));
+
+# Read activity switch events
+# The read message is like "com.tencent.qqlivepad/com.tencent.qqlive.ona.activity.HomeActivity:com.qiyi.video.pad/org.qiyi.android.video.MainActivity",
+# format is "current activity:next activity"
+int buf_size = 512;
+char* buf = (char*)malloc(buf_size);
+int msg_size = 0;
+# first read the message size
+int res = read(mSockApp, &msg_size, sizeof(msg_size));
+if (msg_size > buf_size) {
+  buf = (unsigned char*)realloc(buf, msg_size + 1);
+  buf_size = msg_size + 1;
+}
+res = read(mSockApp, buf, msg_size);
+buf[msg_size] = '\0';
+
+# Start App
+# Type 1: start App with package name
+# message format: "type_id:package_name"
+std::string message = "0:com.tencent.qqlivepad";
+int len = message.size();
+int res = send(mSockApp, (void*)(&len), sizeof(int), 0);
+int res = send(mSockApp, message.c_str(), message.size(), 0);
+
+# Type 2: start App with specific URI
+# message format: "type_id:Action:URI"
+std::string message = "1:android.intent.action.VIEW:mgtvapp://vod/player?clipId=333301&from=com.mgtv.os&actionSourceId=1012.alibaba.ailabs.genie.launcher&pkg=com.mgtv.tv";
+int len = message.size();
+int res = send(mSockApp, (void*)(&len), sizeof(int), 0);
+int res = send(mSockApp, message.c_str(), message.size(), 0);
+
+
+# ****************************************************************************
+# ***          Sample code, how to connect AicCmdChannelService          ***
+# ****************************************************************************
+static const char* kSockWithId = "127.0.0.1";
+static const int Port = 8771;
+
+# Connec AicCmdChannelService
+mSockCmdChannel = socket(AF_INET, SOCK_STREAM, 0);
+struct sockaddr_in addr;
+memset(&addr, 0, sizeof(struct sockaddr_in));
+addr.sin_family = AF_INET;
+addr.sin_port = htons(Port);
+inet_pton(AF_INET, kSockWithId, &addr.sin_addr);
+int res = connect(mSockCmdChannel, (struct sockaddr*)&addr, sizeof(struct sockaddr_in));
+
+# Send command to AicCmdChannelService
+int res = -1;
+std::string message("dumpsys SurfaceFlinger");
+int len = message.size();
+res = send(mSockCmdChannel, (void*)(&len), sizeof(int), 0);
+res = send(mSockCmdChannel, message.c_str(), len, 0);
+
+# Read output from AicCmdChannelService
+int buf_size = 512;
+char* buf = (char*)malloc(buf_size);
+int msg_size = 0;
+int res = read(mSockCmdChannel, &msg_size, sizeof(msg_size));
+if (msg_size > buf_size) {
+  buf = (unsigned char*)realloc(buf, msg_size + 1);
+  buf_size = msg_size + 1;
+}
+res = read(mSockCmdChannel, buf, msg_size);
+buf[msg_size] = '\0';
+
+
+#**********************************************************************************
+#****          send Layer info to streamer                *************************
+#**********************************************************************************
+#Add new event DD_EVENT_UPDATE_LAYERS and related struct to update layer info
+
+#define DD_EVENT_UPDATE_LAYERS 0x1102
+
+typedef struct _rect_t {
+  int left;
+  int top;
+  int right;
+  int bottom;
+} rect_t;
+
+typedef struct _layer_info_t {
+  uint64_t layerId;
+  uint32_t type;
+  uint32_t stackId;
+  uint32_t taskId;
+  uint32_t userId;
+  uint32_t index;
+  rect_t srcCrop;
+  rect_t dstFrame;
+  uint32_t transform;
+  uint32_t z;
+  int32_t blendMode;
+  float planeAlpha;
+  uint32_t color;
+  uint32_t changed;
+  char name[96];
+} layer_info_t;
+
+typedef struct _update_layers_event_t {
+  display_event_t event;
+  uint32_t numLayers;
+  layer_info_t layers[0];
+} update_layers_event_t;
+
+#****************************************************************
+#get layer info send from hwc(send only the layer info changed)
+#****************************************************************
+# process the DD_EVNET_UPDATE_LAYERS event in event thread
+ClientThread() {
+   --------------------
+   case DD_EVENT_UPDATE_LAYERS:
+       //AIC_LOG(DEBUG, "DD_EVENT_UPDATE_LAYERS");
+       updateLayers(mSockClientFd,ev);
+       break;
+   ---------------------
+}
+# implement updatelayer function
+updateLayers(int fd, display_event_t& event) {
+  update_layers_event_t req;
+  std::vector<layer_info_t> layerInfo;
+  ssize_t len;
+
+
+  len = recv(fd, &req.numLayers, sizeof(req) - sizeof(event),0);
+  if (len == 0) {
+    AIC_LOG(ERROR,"Failed to recv update layers count");
+    return -1;
+  }
+
+  layerInfo.resize(req.numLayers);
+  for (size_t i = 0; i < req.numLayers; i++) {
+    len = recv(fd, &layerInfo.at(i), sizeof(layer_info_t),0);
+    if (len == 0) {
+      AIC_LOG(ERROR,"Failed to recv update layer(%zd) info", i);
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+#************************************************************************************
+#**********       process the layer buffer skip the SurfaceFlinger compose
+#************************************************************************************
+#  add 3 new fields in the private_handle_t, it indicates the buffer format,width,height
+#  you can use these infomation to do color convert&scaling
+struct private_handle {
+    struct native_handle base;
+
+    enum {
+        PRIV_FLAGS_FRAMEBUFFER = 0x00000001
+    };
+
+    // file-descriptors
+    int     fds;
+    // ints
+    int     magic;
+    int     flags;
+    int     size;
+    int     offset;
+
+    // FIXME: the attributes below should be out-of-line
+    uint64_t addr __attribute__((aligned(8)));
+    int     pid;
+    uint32_t droid_format;                //new add
+    uint32_t width;                       //new add
+    uint32_t height;                      //new add
+};
+#*****************************************************
+#**************** format type*************************
+#*****************************************************
+#define HAL_PIXEL_FORMAT_RGBA_8888      1
+#define HAL_PIXEL_FORMAT_RGB_565        4
+#define HAL_PIXEL_FORMAT_YV12           842094169
+
+
+# *********************************************************************************
+# ***   Sample code, how to write video frames (camera) to AIC			***
+# *********************************************************************************
+# Camera open close commands
+enum command
+{
+    CMD_OPEN_CAMERA = 11, # AIC is ready to receive camera data
+    CMD_CLOSE_CAMERA = 12 # AIC wants us to stop sending camera data
+};
+
+#structure to store commands from AIC
+typedef struct camSocketInfo
+{
+    enum command cmd;
+} camSocketInfo_t;
+
+# VideoBuffer: Received from remote client
+# buffer:   points to video buffer(I420 format)
+# width x height = resolution
+struct VideoBuffer
+{
+    uint8_t *buffer;
+	int width;
+    int height;
+}VideoBuffer_t;
+
+# Header files
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include "aic_video.h"
+
+#connect to AIC
+mVideoSocket = socket(AF_UNIX, SOCK_STREAM, 0);
+
+const char* pSocketFile = "/conn/camera-socket";
+snprintf(sockname, sizeof(sockname), "%s", pSocketFile);
+sockaddr_un addr;
+memset(&addr, 0, sizeof(addr));
+addr.sun_family = AF_UNIX;
+strncpy(&addr.sun_path[0], sockname, strlen(sockname));
+int res = connect(mVideoSocket, (struct sockaddr*)&addr
+				sizeof(sa_family_t) + strlen(sockname) + 1);
+
+# Handle AIC camera commands
+switch (cmd) {
+    case CMD_OPEN_CAMERA:
+		# Notify remote client to start video stream.
+
+		# Register on_receive_video_callback callback to retrive
+		# camera data from remote client.
+        remote_client_register_on_receive(on_receive_video_callback);
+        break;
+    case CMD_CLOSE_CAMERA:
+		#This indicates AIC doesn’t want to receive camera data anymore.
+		#Notify remote client to stop video streaming.
+        remote_client_deregister_on_receive();
+		Disconnect();
+        break;
+    default:
+        // Unknown command
+        break;
+    }
+
+#Camera data received from remote client; now send to AIC
+void on_receive_video_callback(VideoBuffer_t * buff)
+{
+	#compute frame size
+	int frame_size = buf->width * buf->height;
+	#Since received video frame is in I420 format then size of video buffer
+	#will be framesize * 1.5
+	ret = send(conn->sock, buf->buffer, (frame_size * 1.5), 0);
+}

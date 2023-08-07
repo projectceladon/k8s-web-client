@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# author: joe.zheng
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+set -e
+
+SELF=`basename $0`
+NAME=${NAME:-"android"} # android container name
+K8S=${K8S:-"n"}         # for k8s environment
+
+DOCKER="sudo docker"
+if [[ "$(id -u)" == "0" ]] || id -nG | grep -qw docker; then
+  DOCKER="docker"
+fi
+
+function msg {
+  echo "$(date -R)> $@"
+}
+
+function err() {
+  echo "$(date -R)> $@" >&2
+}
+
+function total_number() {
+  if [[ "$K8S" == "y" ]]; then
+    echo $(kubectl get po -l app=$NAME -o name | wc -l)
+  else
+    echo $($DOCKER ps -a -f name=$NAME --format '{{.Names}}' | grep -E ^$NAME | wc -l)
+  fi
+}
+
+function running_number() {
+  if [[ "$K8S" == "y" ]]; then
+    echo $(kubectl get po -l app=$NAME --field-selector status.phase=Running -o name | wc -l)
+  else
+    echo $($DOCKER ps -f name=$NAME -f status=running --format '{{.Names}}' | grep -E ^$NAME | wc -l)
+  fi
+}
+
+function ready_ids() {
+  if [[ "$K8S" == "y" ]]; then
+    for i in $(kubectl get po -l app=$NAME --field-selector status.phase=Running -o name); do
+      if kubectl exec $i -c $NAME -- getprop | grep -q boot_completed; then
+        echo ${i#"pod/${NAME}-"}
+      fi
+    done
+  else
+    for i in $($DOCKER ps -f name=$NAME -f status=running --format '{{.Names}}' | grep -E ^$NAME); do
+      if $DOCKER exec $i getprop | grep -q boot_completed; then
+        echo ${i#"$NAME"}
+      fi
+    done
+  fi
+}
+
+function main() {
+  local wait_start=${WAIT_START:-30}
+  local interval=${INTERVAL:-10}
+
+  local help=$(cat <<EOF
+Usage: $SELF [-w <sec>] [-i <sec>] [-k] [-h]
+  Monitor status of the android containers until all are boot completed
+
+  -w <sec>:  seconds to wait before start to check, default: $wait_start
+  -i <sec>:  seconds to wait between each status polling, default: $interval
+  -k:        for K8S environment, default: $K8S
+  -h:        print the usage message
+
+Examples:
+  * wait until all are booted: $SELF
+  * record the boot up time: time $SELF
+EOF
+)
+
+  while getopts ":i:w:kh" opt
+  do
+    case $opt in
+      k ) K8S="y";;
+      w ) wait_start=$OPTARG;;
+      i ) interval=$OPTARG;;
+      h ) echo "$help" && exit;;
+      * ) echo "no such option: $opt" && exit 1;;
+    esac
+  done
+  shift $((OPTIND-1))
+
+  msg "start to check"
+  dumpvars "SELF K8S NAME wait_start interval"
+
+  msg "wait to start for ${wait_start}s"
+  sleep $wait_start
+
+  msg "check container running"
+  local total="$(total_number)"
+  local running
+  while true; do
+    running="$(running_number)"
+    msg "$running/$total"
+    if (( $running >= $total )); then
+      msg "all are running"
+      break
+    fi
+    sleep $interval
+  done
+
+  msg "check android ready"
+  local ready ready_ids
+  while true; do
+    ready_ids="$(echo $(ready_ids))"
+    ready="$(echo $ready_ids | wc -w)"
+    msg "$ready/$total"
+    msg "ready ids: $ready_ids"
+    if (( $ready >= $total )); then
+      msg "all are ready"
+      break
+    fi
+    sleep $interval
+  done
+
+  msg "done"
+}
+
+function dumpvars() {
+  for v in $@; do
+    eval echo "$v: \${$v}"
+  done
+}
+
+main "$@"

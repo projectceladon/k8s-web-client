@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# author: joe.zheng
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+set -e
+
+# IP of the primary interface on the host
+HOST_IP=$(ip route get 1 | head -1 | awk '{print $7}')
+
+DOCKER="sudo docker"
+if [[ "$(id -u)" == "0" ]] || id -nG | grep -qw docker; then
+  DOCKER="docker"
+fi
+
+ADDRESS=$HOST_IP                  # API server address
+VERSION=auto                      # k8s stable version
+OPTIONS="yes no auto"             # valid options
+NETWORK_PLUGINS="flannel calico"  # supported network plugins
+NETWORK=flannel                   # network plugin
+MIRROR=auto                       # mirror option
+RESET=n                           # reset cluster first
+DRY_RUN=n                         # dry run or not
+
+function msg() {
+  echo "> $@"
+}
+
+function err() {
+  echo "> $@" >&2
+}
+
+function usage() {
+  local self=`basename $0`
+  cat <<EOF
+Usage: $self [-a <addr>] [-m <opt>] [-v <ver>] [-r] [-n] [-h]
+  Deploy k8s and setup master node for local developent purpose
+
+  -a <addr>:       API server address, default: $ADDRESS
+  -m <opt>:        mirror option [$OPTIONS], default: $MIRROR
+  -v <ver>:        k8s version, default: auto match with kubelet version
+  -N <plugin>:     network plugin type[$NETWORK_PLUGINS], default:$NETWORK
+  -r:              reset k8s cluster first, default: $RESET
+  -n:              dry run, print out information only, default: $DRY_RUN
+  -h:              print the usage message
+EOF
+
+}
+
+while getopts ":a:m:v:N:hnr" opt
+do
+  case $opt in
+    a ) ADDRESS=$OPTARG;;
+    m ) MIRROR=$OPTARG
+        if echo $OPTIONS | grep -v -w $MIRROR >/dev/null 2>&1; then
+          echo "invalid mirror option $MIRROR"
+          usage && exit 1
+        fi
+        ;;
+    v ) VERSION=$OPTARG;;
+    N ) NETWORK=$OPTARG
+        if echo $NETWORK_PLUGINS | grep -v -w $NETWORK >/dev/null 2>&1; then
+            echo "invalid network option $NETWORK"
+            usage && exit 1
+        fi
+        ;;
+    r ) RESET=y;;
+    n ) DRY_RUN=y;;
+    h ) usage && exit;;
+    * ) usage && exit 1;;
+  esac
+done
+shift $((OPTIND-1))
+
+for v in DOCKER HOST_IP ADDRESS VERSION MIRROR RESET DRY_RUN
+do
+  eval echo "$v: \${$v}"
+done
+
+[[ $DRY_RUN == "y" ]] && exit
+
+function main() {
+  ensure_nonroot
+  check_prerequisites
+  ensure_swapoff
+  ensure_iptables
+  need_mirror
+  ensure_installed
+  [[ $RESET == "y" ]] && reset_k8s
+  init_k8s
+
+  msg "done"
+  cat <<EOF
+here are some useful commands:
+- check status: kubectl get pods -A
+- enable bash completion: source <(kubectl completion bash)
+EOF
+}
+
+function check_prerequisites() {
+  msg "check prerequisites"
+  if [[ -z $(which curl) ]]; then
+    err "curl is not available"
+    exit 1
+  fi
+  if [[ -z $(which docker) ]]; then
+    err "docker is not available"
+    exit 1
+  fi
+  msg "check network"
+  if ! curl -s -m 2 ifconfig.co >/dev/null; then
+    err "can't access external network, continue for internal network scenario"
+  fi
+  msg "check docker pull"
+  if ! $DOCKER pull hello-world >/dev/null 2>&1; then
+    err "docker pull can't work, check docker configuration first"
+    exit 1
+  fi
+}
+
+NEED_MIRROR=n
+function need_mirror() {
+  msg "is mirror needed"
+  if [[ $MIRROR == "auto" ]]; then
+    msg "check whether we can access google cloud"
+    if $DOCKER pull k8s.gcr.io/pause >/dev/null 2>&1; then
+      MIRROR=no
+    else
+      MIRROR=yes
+    fi
+  fi
+  if [[ $MIRROR == "yes" ]]; then
+    NEED_MIRROR=y
+  fi
+  msg "need mirror: $NEED_MIRROR"
+}
+
+function ensure_installed() {
+  msg "ensure k8s installed"
+  if [[ -n $(which kubeadm) ]]; then
+    msg "already installed"
+  else
+    local codename="xenial"  # the official doc use xenial for all
+    local key="https://packages.cloud.google.com/apt/doc/apt-key.gpg"
+    local src="https://apt.kubernetes.io/"
+    local list="/etc/apt/sources.list.d/kubernetes.list"
+    local pkgs="kubelet kubeadm kubectl"
+    if [[ $NEED_MIRROR == "y" ]]; then
+      key="https://mirrors.aliyun.com/kubernetes/apt/doc/apt-key.gpg"
+      src="https://mirrors.aliyun.com/kubernetes/apt/"
+    fi
+
+    msg "add $src to $list for $codename"
+    curl -s $key | sudo apt-key add -
+    cat <<EOF | sudo tee -a $list
+deb $src kubernetes-$codename main
+EOF
+
+    msg "apt update and install: $pkgs"
+    sudo apt update && sudo apt install -y $pkgs
+    msg "no auto update for $pkgs"
+    sudo apt-mark hold $pkgs
+  fi
+}
+
+function ensure_swapoff() {
+  # k8s requires swapoff
+  msg "ensure swap is off"
+  local n=`cat /proc/swaps | wc -l`
+  if (( n > 1 )); then
+    local swap=$(systemctl list-units | perl -ne 'print $1 if /^\s+(dev-\w+\.swap)\s+/')
+    if [[ -n $swap ]]
+    then
+      msg "disable swap device $swap"
+      sudo systemctl mask $swap
+    fi
+    msg "disable any swap device in fstab"
+    sudo perl -pi -e 's/^(.+none\s+swap.+)/#$1/ unless /^#/' /etc/fstab
+    msg "swapoff -a"
+    sudo swapoff -a
+  else
+    msg "no swap device"
+  fi
+}
+
+function ensure_iptables() {
+  msg "ensure iptables see bridged traffic"
+  local prefix="/proc/sys/net/bridge/bridge-nf-call-ip"
+  if [[ "$(cat ${prefix}tables)" != "1" || "$(cat ${prefix}6tables)" != "1" ]]; then
+    msg "bridge-nf-call-iptables is disabled, enable it"
+    cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+EOF
+    sudo sysctl --system
+  fi
+}
+
+function ensure_nonroot() {
+  if [[ $(id -u) == "0" ]]; then
+    msg "should not run as root user to avoid confusion later!"
+    exit 1
+  fi
+}
+
+function reset_k8s() {
+  msg "reset k8s"
+  sudo kubeadm reset
+  msg "release cni0 if any"
+  if ip link show cni0 >/dev/null 2>&1; then
+    sudo ip link set cni0 down
+    sudo ip link delete cni0
+    sudo rm -rf /etc/cni
+  fi
+}
+
+function init_k8s() {
+  msg "initialize k8s"
+
+  if kubectl cluster-info >/dev/null 2>&1; then
+    msg "already initialized"
+    return
+  fi
+
+  # different CNI addon requires different pod-network-cider, here is for flannel
+  local cidr="10.244.0.0/16"
+  local extra=
+  msg "init k8s control-plane node, api:$ADDRESS, cidr:$cidr"
+  if [[ $NEED_MIRROR  = "y" ]]; then
+    local repo="registry.aliyuncs.com/google_containers"
+    extra="--image-repository $repo"
+    msg "mirror is required, use image repository: $repo"
+  fi
+  if [[ $VERSION = "auto" ]]; then
+    VERSION=$(kubelet --version | awk '{print $2}' | sed -e "s/^v//")
+  fi
+  sudo kubeadm init --kubernetes-version=$VERSION --apiserver-advertise-address=$ADDRESS --pod-network-cidr=$cidr $extra
+
+  # config
+  msg "setup config to access cluster"
+  mkdir -p $HOME/.kube
+  sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
+  sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+  # untaint master
+  msg "allow to schedule pods on the master"
+  kubectl taint nodes --all node-role.kubernetes.io/master-
+  if kubectl get no |grep -qw control-plane; then
+    kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+  fi
+
+  if [[ -e k8s/network/$NETWORK.yaml ]]; then
+      msg "install network plugin: $NETWORK"
+      kubectl apply -f k8s/network/$NETWORK.yaml
+  fi
+}
+
+main "$@"

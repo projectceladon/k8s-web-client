@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "webrtc.fullname" . }}
+  labels:
+    {{- include "webrtc.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+      nodePort: {{ .Values.service.nodePort | add1 }}
+      protocol: TCP
+      name: orignal
+    - port: {{ .Values.service.port | add 80 }}
+      targetPort: {{ .Values.service.port | add 80 }}
+      nodePort: {{ .Values.service.nodePort }}
+      protocol: TCP
+      name: main
+  selector:
+    {{- include "webrtc.selectorLabels" . | nindent 4 }}

@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# author: joe.zheng
+#
+# Copyright (C) 2018 Intel Corporation.
+#
+# This software and the related documents are Intel copyrighted materials,
+# and your use of them is governed by the express license under which they
+# were provided to you (End User License Agreement for the Intel(R) Software
+# Development Products (Version September 2018)). Unless the License provides
+# otherwise, you may not use, modify, copy, publish, distribute, disclose or
+# transmit this software or the related documents without Intel's prior
+# written permission.
+#
+# This software and the related documents are provided as is, with no
+# express or implied warranties, other than those that are expressly
+# stated in the License.
+#
+
+# I am serious
+set -e
+
+function msg {
+  echo "> $@"
+}
+
+function usage() {
+  local self=`basename $0`
+  cat <<EOF
+Usage: $self [-d] [-f] [-s] [-h] [-n <name>] [-o <dir>] [<src>]
+  Generate release package from source tree
+
+  -d:        dry run, output information only, default: $DRY_RUN
+  -f:        force removal, default: $FORCE
+  -s:        source code release, default: $REL_SRC
+  -n <name>: base name of the package file, default: $PKG_NAME
+  -o <dir>:  output directory, default: $OUT_ROOT
+  -h:        print the usage message
+  <src>:     top of the source tree, default: $TOP_ROOT
+
+  The result will be in the output directory, including:
+  * a folder named $OUT_NAME
+  * a compressed package file of the above
+
+  They need to be removed first if already exist
+EOF
+
+}
+
+FORCE=n
+DRY_RUN=n
+REL_SRC=n
+PKG_NAME=release
+LOCAL_PRODUCT_OUT=$PWD/out/target/product/$TARGET_PRODUCT
+TOP_ROOT=${ANDROID_BUILD_TOP:-$(pwd)}
+OUT_ROOT=${LOCAL_PRODUCT_OUT:-$TOP_ROOT}
+OUT_NAME=release
+
+DIR_SRC="device/intel/cic kernel/modules/cic vendor/intel/cic vendor/intel/tools/log_capture"
+DIR_K8S="vendor/intel/cic/host/k8s"
+
+while getopts ":dfshn:o:" opt
+do
+  case $opt in
+    d ) DRY_RUN=y;;
+    f ) FORCE=y;;
+    s ) REL_SRC=y;;
+    n ) PKG_NAME=$OPTARG;;
+    o ) OUT_ROOT=$OPTARG;;
+    h ) usage && exit;;
+    * ) usage && exit 1;;
+  esac
+done
+shift $((OPTIND-1))
+
+TOP_ROOT=${1:-$TOP_ROOT}
+
+SRC_ROOT=$TOP_ROOT/vendor/intel/cic
+SRC_DIR=$TOP_ROOT/$DIR_K8S
+PKG_FILE=${PKG_NAME}.tar.gz
+OUT_DIR=$OUT_ROOT/$OUT_NAME
+OUT_PKG=$OUT_ROOT/$PKG_FILE
+OUT_SRC=$OUT_DIR/aic
+
+for v in FORCE DRY_RUN REL_SRC DIR_SRC DIR_K8S TOP_ROOT SRC_ROOT SRC_DIR OUT_ROOT OUT_DIR OUT_SRC PKG_NAME OUT_PKG
+do
+  eval echo "$v: \${$v}"
+done
+
+[[ $DRY_RUN = "y" ]] && exit
+
+msg "clean up output directory first: $OUT_ROOT"
+for i in $OUT_DIR $OUT_PKG
+do
+  if [[ -e $i ]]; then
+    if [[ $FORCE = "y" ]]; then
+      rm -rf $i
+    else
+      read -p "delete $i? y/N: " result
+      if [[ $result = "y" ]]; then
+        rm -rf $i
+      else
+        msg "can not continue, quit"
+        exit
+      fi
+    fi
+  fi
+done
+
+mkdir -p $OUT_DIR/{aic-manager,android,manage-android,adb-forward,coordinator,streamer,owt-server-p2p,webrtc-front-end,k8s,doc,tool,aic-streamer,ga,texture-service}
+[[ $REL_SRC = "y" ]] && mkdir -p $OUT_SRC
+
+function on_err() {
+  msg "oops, clean up before exit!"
+  rm -rf $OUT_DIR $OUT_PKG
+}
+trap on_err ERR
+
+msg "copy files from $SRC_DIR to $OUT_DIR"
+cp -r $SRC_DIR/README.md $OUT_DIR
+cp -r $SRC_DIR/doc/sample-code $OUT_DIR/doc/
+cp -r $SRC_DIR/image/{manage-android,adb-forward,coordinator,streamer,owt-server-p2p,webrtc-front-end,aic-streamer,texture-service,ai-dispatcher} $OUT_DIR
+cp -r $TOP_ROOT/vendor/intel/external/project-celadon/cloud-streaming/* $OUT_DIR/ga/.
+cp -rP $SRC_DIR/yaml/* $OUT_DIR/k8s/
+cp -r $SRC_DIR/script/{gen-img-pkg,update-android,setup-cluster,deploy-to-k8s,aic-cloud,setup-data,deploy-prometheus} $OUT_DIR/tool/
+if [[ $REL_SRC = "y" ]]
+then
+  src=$TOP_ROOT/manifest.xml
+  msg "copy $src to $OUT_SRC"
+  cp $src $OUT_SRC
+
+  src=$DIR_SRC
+  dst=$OUT_SRC/patch.tar.gz
+  msg "generate $dst from: $src"
+  (cd $TOP_ROOT && tar czf $OUT_SRC/patch.tar.gz --exclude-vcs --exclude=$DIR_K8S $src)
+fi
+
+msg "add license"
+for d in aic-manager manage-android adb-forward coordinator streamer webrtc-front-end k8s
+do
+  ln -f $SRC_ROOT/README $OUT_DIR/$d/LICENE
+done
+
+msg "compressing $OUT_DIR"
+(cd $OUT_ROOT && tar czf $PKG_FILE --exclude-vcs $OUT_NAME)
+msg "done: $OUT_PKG"

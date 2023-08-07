@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: aic-manager
+  namespace: "$NAMESPACE"
+spec:
+  selector:
+    matchLabels:
+      app: aic-manager
+  template:
+    metadata:
+      labels:
+        app: aic-manager
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: GPU-type
+                operator: Exists
+      hostPID: true
+      initContainers:
+      - name: umount-lxcfs
+        image: busybox:1.28
+        securityContext:
+          privileged: true
+        command: ['sh', '-c', 'echo "umount" && umount /run/k8s/aic_manager_lxcfs || true']
+        volumeMounts:
+        - name: host-run
+          mountPath: /run
+          mountPropagation: Bidirectional
+      containers:
+      - name: aic-manager
+        image: aic-manager:local
+        args: ["-m", "-l", "server"]
+        env:
+        - name: K8S_ENV
+          value: "true"
+        - name: ENV_USE_HUGE_PAGE
+          value: "$USE_HUGE_PAGE"
+        - name: CPU_ALLOC_ALGORITHM
+          value: $CPU_ALLOC_ALGORITHM
+        - name: THREADS_PER_POOL
+          value: "$THREADS_PER_POOL"
+        - name: INSTANCE_PER_POOL
+          value: "$INSTANCE_PER_POOL"
+        - name: SHARED_INSTANCES
+          value: "$SHARED_INSTANCES"
+        - name: CORES_MONOPOLY
+          value: "$CORES_MONOPOLY"
+        volumeMounts:
+        - name: lib-modules
+          mountPath: /lib/modules
+        - name: usr-src
+          mountPath: /usr/src
+        - name: opt
+          mountPath: /opt
+        - name: aic-manager-status
+          mountPath: /status
+        - name: host-cgroup
+          mountPath: /sys/fs/cgroup
+        - name: aic-manager-lxcfs
+          mountPath: /var/lib/lxcfs
+          mountPropagation: Bidirectional
+        - name: aic-manager-hugetlbfs
+          mountPath: /hugetlbfs
+          mountPropagation: Bidirectional
+        - name: resource-allocate
+          mountPath: /res-alloc
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            memory: "100Mi"
+          limits:
+            memory: "4Gi"
+      volumes:
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+      - name: usr-src
+        hostPath:
+          path: /usr/src
+      - name: opt
+        hostPath:
+          path: /opt
+      - name: aic-manager-status
+        hostPath:
+          path: /run/k8s/aic_manager_status
+          type: DirectoryOrCreate
+      - name: host-cgroup
+        hostPath:
+          path: /sys/fs/cgroup
+      - name: aic-manager-lxcfs
+        hostPath:
+          path: /run/k8s/aic_manager_lxcfs
+          type: DirectoryOrCreate
+      - name: aic-manager-hugetlbfs
+        hostPath:
+          path: /run/k8s/hugetlbfs
+          type: DirectoryOrCreate
+      - name: resource-allocate
+        hostPath:
+          path: /run/k8s/res-alloc
+          type: DirectoryOrCreate
+      - name: host-run
+        hostPath:
+          path: /run
+          type: DirectoryOrCreate

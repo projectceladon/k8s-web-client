@@ -1,0 +1,474 @@
+{
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "metadata": {
+        "name": "android-template"
+    },
+    "spec": {
+        "replicas": 1,
+        "selector": {
+            "matchLabels": {
+                "app": "android"
+            }
+        },
+        "template": {
+            "metadata": {
+                "labels": {
+                    "app": "android",
+                    "version": "default"
+                }
+            },
+            "spec": {
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "K8S_ENV",
+                                "value": "true"
+                            },
+                            {
+                                "name": "MY_POD_NAME",
+                                "valueFrom": {
+                                    "fieldRef": {
+                                        "apiVersion": "v1",
+                                        "fieldPath": "metadata.name"
+                                    }
+                                }
+                            },
+                            {
+                                "name": "POD_VERSION",
+                                "valueFrom": {
+                                    "fieldRef": {
+                                        "apiVersion": "v1",
+                                        "fieldPath": "metadata.labels['version']"
+                                    }
+                                }
+                            },
+                            {
+                                "name": "POD_APPINFO",
+                                "valueFrom": {
+                                    "fieldRef": {
+                                        "apiVersion": "v1",
+                                        "fieldPath": "metadata.labels['appInfo']"
+                                    }
+                                }
+                            }
+                        ],
+                        "image": "manage-android:local",
+                        "lifecycle": {
+                            "preStop": {
+                                "exec": {
+                                    "command": [
+                                        "/bin/sh",
+                                        "-c",
+                                        "sleep 20; umount -l /data"
+                                    ]
+                                }
+                            }
+                        },
+                        "name": "manage-android",
+                        "securityContext": {
+                            "privileged": true
+                        },
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/res-alloc",
+                                "name": "resource-allocate"
+                            },
+                            {
+                                "mountPath": "/share-data",
+                                "name": "share-data"
+                            },
+                            {
+                                "mountPath": "/private-data",
+                                "name": "private-data"
+                            },
+                            {
+                                "mountPath": "/data",
+                                "mountPropagation": "Bidirectional",
+                                "name": "data",
+                                "subPathExpr": "$(MY_POD_NAME)"
+                            },
+                            {
+                                "mountPath": "/conn",
+                                "name": "conn"
+                            }
+                        ],
+                        "resources": {
+                            "requests": {
+                                "memory": "100Mi"
+                            },
+                            "limits": {
+                                "memory": "2Gi"
+                            }
+                        }
+                    },
+                    {
+                        "args": [
+                            "-e"
+                        ],
+                        "env": [
+                            {
+                                "name": "MY_POD_NAME",
+                                "valueFrom": {
+                                    "fieldRef": {
+                                        "apiVersion": "v1",
+                                        "fieldPath": "metadata.name"
+                                    }
+                                }
+                            },
+                            {
+                                "name": "K8S_ENV",
+                                "value": "true"
+                            },
+                            {
+                                "name": "K8S_ENV_DISPLAY_RESOLUTION_X",
+                                "value": "1280"
+                            },
+                            {
+                                "name": "K8S_ENV_DISPLAY_RESOLUTION_Y",
+                                "value": "720"
+                            },
+                            {
+                                "name": "K8S_ENV_DISPLAY_FPS",
+                                "value": "30"
+                            },
+                            {
+                                "name": "K8S_ENV_USE_GFX",
+                                "value": "true"
+                            },
+                            {
+                                "name": "CAM_SOCK_TYPE",
+                                "value": "unix"
+                            },
+                            {
+                                "name": "ENABLE_DATA_OVERLAY",
+                                "value": "true"
+                            }
+                        ],
+                        "image": "android:local",
+                        "name": "android",
+                        "startupProbe": {
+                            "exec": {
+                                "command": ["sh", "-c", "[ $(getprop sys.boot_completed) ] && [ $(getprop sys.boot_completed) -eq 1 ]"]
+                            },
+                            "failureThreshold": 120,
+                            "periodSeconds": 10
+                        },
+                        "securityContext": {
+                            "privileged": true
+                        },
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/data",
+                                "mountPropagation": "HostToContainer",
+                                "name": "data",
+                                "subPathExpr": "$(MY_POD_NAME)"
+                            },
+                            {
+                                "mountPath": "/conn",
+                                "name": "conn"
+                            },
+                            {
+                                "mountPath": "/ipc",
+                                "name": "ipc"
+                            },
+                            {
+                                "mountPath": "/binderfs",
+                                "name": "binderfs"
+                            },
+                            {
+                                "mountPath": "/proc/cpuinfo",
+                                "name": "aic-manager-lxcfs-proc",
+                                "subPath": "cpuinfo",
+                                "mountPropagation": "HostToContainer"
+                            },
+                            {
+                                "mountPath": "/proc/meminfo",
+                                "name": "aic-manager-lxcfs-proc",
+                                "subPath": "meminfo",
+                                "mountPropagation": "HostToContainer"
+                            },
+                            {
+                                "mountPath": "/proc/uptime",
+                                "name": "aic-manager-lxcfs-proc",
+                                "subPath": "uptime",
+                                "mountPropagation": "HostToContainer"
+                            },
+                            {
+                                "mountPath": "/sys/devices/system/cpu/",
+                                "name": "aic-manager-lxcfs-cpu",
+                                "mountPropagation": "HostToContainer"
+                            },
+                            {
+                                "mountPath": "/sys/devices/system/cpu/possible",
+                                "name": "aic-manager-lxcfs-cpu",
+                                "subPath": "online",
+                                "mountPropagation": "HostToContainer"
+                            },
+                            {
+                                "mountPath": "/sys/devices/system/cpu/present",
+                                "name": "aic-manager-lxcfs-cpu",
+                                "subPath": "online",
+                                "mountPropagation": "HostToContainer"
+                            }
+                        ],
+                        "resources": {
+                            "requests": {
+                                "memory": "1.5Gi"
+                            },
+                            "limits": {
+                                "memory": "4Gi"
+                            }
+                        }
+                    },
+                    {
+                        "args": [
+                            "http://owt:8096"
+                        ],
+                        "env": [
+                            {
+                                "name": "K8S_ENV",
+                                "value": "true"
+                            },
+                            {
+                                "name": "K8S_ENV_DISPLAY_RESOLUTION_X",
+                                "value": "1280"
+                            },
+                            {
+                                "name": "K8S_ENV_DISPLAY_RESOLUTION_Y",
+                                "value": "720"
+                            },
+                            {
+                                "name": "K8S_ENV_DISPLAY_FPS",
+                                "value": "30"
+                            },
+                            {
+                                "name": "K8S_ENV_STREAM_BIT_RATE",
+                                "value": "2000"
+                            },
+                            {
+                                "name": "K8S_ENV_STATELESS",
+                                "value": "true"
+                            },
+                            {
+                                "name": "K8S_ENV_USE_ENCODED_FRAME",
+                                "value": "true"
+                            },
+                            {
+                                "name": "VIRTUAL_INPUT_NUM",
+                                "value": "2"
+                            },
+                            {
+                                "name": "ENABLE_ENV_TELEMETRY",
+                                "value": "true"
+                            },
+                            {
+                                "name": "CAM_SOCK_TYPE",
+                                "value": "unix"
+                            },
+                            {
+                                "name": "MY_POD_NAME",
+                                "valueFrom": {
+                                    "fieldRef": {
+                                        "apiVersion": "v1",
+                                        "fieldPath": "metadata.name"
+                                    }
+                                }
+                            }
+                        ],
+                        "image": "streamer:local",
+                        "name": "streamer",
+                        "startupProbe": {
+                            "exec": {
+                                    "command": ["bash", "-c", "cat /conn/.p2p_status && [ $(cat /conn/.p2p_status) = 'started' ]"]
+                            },
+                            "failureThreshold": 120,
+                            "periodSeconds": 10
+                        },
+                        "securityContext": {
+                            "privileged": true,
+                            "runAsUser": 0
+                        },
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/conn",
+                                "name": "conn"
+                            },
+                            {
+                                "mountPath": "/binderfs",
+                                "mountPropagation": "HostToContainer",
+                                "name": "binderfs"
+                            }
+                        ],
+                        "resources": {
+                            "requests": {
+                                "memory": "200Mi"
+                            },
+                            "limits": {
+                                "memory": "2Gi"
+                            }
+                        }
+                    },
+                    {
+                        "args": [
+                            "-i",
+                            "0",
+                            "127.0.0.1"
+                        ],
+                        "env": [
+                            {
+                                "name": "K8S_ENV",
+                                "value": "true"
+                            },
+                            {
+                                "name": "render_server_port",
+                                "value": "23432"
+                            }
+                        ],
+                        "image": "icr:local",
+                        "name": "icr",
+                        "securityContext": {
+                            "privileged": true,
+                            "runAsUser": 0
+                        },
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/conn",
+                                "name": "conn"
+                            }
+                        ],
+                        "resources": {
+                            "requests": {
+                                "memory": "200Mi"
+                            },
+                            "limits": {
+                                "memory": "2Gi"
+                            }
+                        }
+                    }
+                ],
+                "initContainers": [
+                    {
+                        "command": [
+                            "sh",
+                            "-c",
+                            "while [ ! -f /aic_manager_status/.ready ]\ndo\n  echo \"wait for aic-manager\"\n  sleep 1\ndone\ntouch /data/.enable_overlay\n"
+                        ],
+                        "env": [
+                            {
+                                "name": "MY_POD_NAME",
+                                "valueFrom": {
+                                    "fieldRef": {
+                                        "apiVersion": "v1",
+                                        "fieldPath": "metadata.name"
+                                    }
+                                }
+                            }
+                        ],
+                        "image": "busybox:1.28",
+                        "name": "init-android",
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/aic_manager_status",
+                                "name": "aic-manager-status"
+                            },
+                            {
+                                "mountPath": "/data",
+                                "name": "data",
+                                "subPathExpr": "$(MY_POD_NAME)"
+                            }
+                        ]
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "data",
+                        "persistentVolumeClaim": {
+                            "claimName": "data"
+                        }
+                    },
+                    {
+                        "name": "share-data",
+                        "persistentVolumeClaim": {
+                            "claimName": "share-data"
+                        }
+                    },
+                    {
+                        "name": "private-data",
+                        "persistentVolumeClaim": {
+                            "claimName": "private-data"
+                        }
+                    },
+                    {
+                        "hostPath": {
+                            "path": "/run/k8s/res-alloc",
+                            "type": "DirectoryOrCreate"
+                        },
+                        "name": "resource-allocate"
+                    },
+                    {
+                        "hostPath": {
+                            "path": "/run/k8s/aic_manager_status",
+                            "type": "DirectoryOrCreate"
+                        },
+                        "name": "aic-manager-status"
+                    },
+                    {
+                        "hostPath": {
+                            "path": "/run/k8s/aic_manager_lxcfs/proc",
+                            "type": "DirectoryOrCreate"
+                        },
+                        "name": "aic-manager-lxcfs-proc"
+                    },
+                    {
+                        "hostPath": {
+                            "path": "/run/k8s/aic_manager_lxcfs/sys/devices/system/cpu",
+                            "type": "DirectoryOrCreate"
+                        },
+                        "name": "aic-manager-lxcfs-cpu"
+                    },
+                    {
+                        "emptyDir": {
+                            "medium": "Memory"
+                        },
+                        "name": "conn"
+                    },
+                    {
+                        "emptyDir": {
+                            "medium": "Memory"
+                        },
+                        "name": "ipc"
+                    },
+                    {
+                        "emptyDir": {
+                            "medium": "Memory"
+                        },
+                        "name": "binderfs"
+                    }
+                ],
+                "affinity": {
+                    "nodeAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                            "nodeSelectorTerms": [
+                                {
+                                    "matchExpressions": [
+                                        {
+                                            "key": "GPU-type",
+                                            "operator": "In",
+                                            "values": ["soft", "dg2"]
+                                        },
+                                        {
+                                            "key": "USER-selector",
+                                            "operator": "DoesNotExist"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
